@@ -1,0 +1,41 @@
+# Gradle & Build Outputs
+.gradle/
+.kotlin/
+build/
+**/build/
+app/build/
+app/release/
+captures/
+.cxx/
+*.apk
+*.aab
+
+# Local SDK & Signing Secrets
+local.properties
+keystore.properties
+*.jks
+*.keystore
+*.pepk
+*.pem
+*.p12
+*.pfx
+schwabquant-release.jks
+
+# Environment Files
+.env
+.env.*
+
+# IDE / Workspace-Specific Files
+.idea/
+.idea/workspace.xml
+.idea/caches/
+*.iml
+
+# Stray Token / Credential / Secret Files (preserve source, XML & Markdown docs)
+*secret*
+*token*
+*credential*
+!*.kt
+!*.java
+!*.xml
+!*.md

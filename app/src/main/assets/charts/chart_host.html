@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000000; font-family: sans-serif; }
+    #root { display: flex; flex-direction: column; width: 100%; height: 100%; }
+    #main-chart { flex: 1 1 0; min-height: 0; width: 100%; }
+    #rsi-chart { height: 112px; width: 100%; display: none; border-top: 1px solid #242A33; }
+  </style>
+  <script src="./lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div id="root">
+    <div id="main-chart"></div>
+    <div id="rsi-chart"></div>
+  </div>
+  <script>
+    (function () {
+      const mainContainer = document.getElementById('main-chart');
+      const rsiContainer = document.getElementById('rsi-chart');
+
+      const mainChart = LightweightCharts.createChart(mainContainer, {
+        layout: { background: { color: '#000000' }, textColor: '#8B949E', fontSize: 11 },
+        grid: { vertLines: { color: '#161B22' }, horzLines: { color: '#161B22' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: '#242A33', scaleMargins: { top: 0.08, bottom: 0.20 } },
+        timeScale: { borderColor: '#242A33', timeVisible: true, secondsVisible: false, rightOffset: 5 }
+      });
+
+      const candleSeries = mainChart.addCandlestickSeries({
+        upColor: '#00E676',
+        downColor: '#FF5252',
+        borderUpColor: '#00E676',
+        borderDownColor: '#FF5252',
+        wickUpColor: '#00E676',
+        wickDownColor: '#FF5252',
+        priceLineVisible: true,
+        lastValueVisible: true
+      });
+
+      const volumeSeries = mainChart.addHistogramSeries({
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'volume',
+        lastValueVisible: false,
+        priceLineVisible: false
+      });
+      mainChart.priceScale('volume').applyOptions({
+        scaleMargins: { top: 0.82, bottom: 0.0 }
+      });
+
+      function makeLine(color, lineWidth, title) {
+        return mainChart.addLineSeries({
+          color: color,
+          lineWidth: lineWidth || 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+          title: title || ''
+        });
+      }
+
+      const ema9Series = makeLine('#38BDF8', 1.5, 'EMA9');
+      const ema21Series = makeLine('#F59E0B', 1.5, 'EMA21');
+      const sma50Series = makeLine('#A78BFA', 1.5, 'SMA50');
+      const sma200Series = makeLine('#EC4899', 1.5, 'SMA200');
+      const rmaFastSeries = makeLine('#2DD4BF', 1.5, 'RMA9');
+      const rmaSlowSeries = makeLine('#FB7185', 1.5, 'RMA21');
+      const vwapSeries = makeLine('#FBBF24', 1.5, 'VWAP');
+
+      const rsiChart = LightweightCharts.createChart(rsiContainer, {
+        layout: { background: { color: '#000000' }, textColor: '#8B949E', fontSize: 10 },
+        grid: { vertLines: { color: '#161B22' }, horzLines: { color: '#161B22' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: '#242A33', scaleMargins: { top: 0.08, bottom: 0.08 } },
+        timeScale: { borderColor: '#242A33', visible: false, rightOffset: 5 }
+      });
+
+      const rsiSeries = rsiChart.addLineSeries({
+        color: '#58A6FF',
+        lineWidth: 1.5,
+        priceLineVisible: false,
+        lastValueVisible: true
+      });
+
+      let rsiGuideLines = [];
+      let activePriceLines = [];
+      let barLookup = new Map();
+      let indLookup = {
+        ema9: new Map(), ema21: new Map(), sma50: new Map(), sma200: new Map(),
+        rmaFast: new Map(), rmaSlow: new Map(), vwap: new Map(), rsi: new Map()
+      };
+      let lastTelemetryMs = 0;
+      let isSyncingRange = false;
+
+      function syncRsiGuides(rsiMode) {
+        rsiGuideLines.forEach(function (pl) {
+          try { rsiSeries.removePriceLine(pl); } catch (e) {}
+        });
+        rsiGuideLines = [];
+        const lowLevel = rsiMode === 'RSI_2' ? 10 : 30;
+        const highLevel = rsiMode === 'RSI_2' ? 90 : 70;
+        rsiGuideLines.push(rsiSeries.createPriceLine({
+          price: highLevel, color: '#FF525288', lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: String(highLevel)
+        }));
+        rsiGuideLines.push(rsiSeries.createPriceLine({
+          price: lowLevel, color: '#00E67688', lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: String(lowLevel)
+        }));
+      }
+
+      function resizeCharts() {
+        const mw = mainContainer.clientWidth;
+        const mh = mainContainer.clientHeight;
+        if (mw > 0 && mh > 0) mainChart.resize(mw, mh);
+        if (rsiContainer.style.display !== 'none') {
+          const rw = rsiContainer.clientWidth;
+          const rh = rsiContainer.clientHeight;
+          if (rw > 0 && rh > 0) rsiChart.resize(rw, rh);
+        }
+      }
+
+      if (typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(resizeCharts);
+        ro.observe(document.getElementById('root'));
+      }
+      window.addEventListener('resize', resizeCharts);
+
+      mainChart.timeScale().subscribeVisibleLogicalRangeChange(function (range) {
+        if (isSyncingRange || !range || rsiContainer.style.display === 'none') return;
+        isSyncingRange = true;
+        try { rsiChart.timeScale().setVisibleLogicalRange(range); } catch (e) {}
+        isSyncingRange = false;
+      });
+      rsiChart.timeScale().subscribeVisibleLogicalRangeChange(function (range) {
+        if (isSyncingRange || !range || rsiContainer.style.display === 'none') return;
+        isSyncingRange = true;
+        try { mainChart.timeScale().setVisibleLogicalRange(range); } catch (e) {}
+        isSyncingRange = false;
+      });
+
+      mainChart.subscribeCrosshairMove(function (param) {
+        const bridge = window.SchwabQuantChartBridge;
+        if (!bridge || !bridge.onCrosshairMove) return;
+        const now = Date.now();
+        if (param && param.time && now - lastTelemetryMs < 32) return;
+        lastTelemetryMs = now;
+        if (!param || !param.time) {
+          bridge.onCrosshairMove(JSON.stringify({ active: false }));
+          return;
+        }
+        const t = Number(param.time);
+        const candle = param.seriesData ? param.seriesData.get(candleSeries) : null;
+        const barMeta = barLookup.get(t);
+        if (!candle && !barMeta) {
+          bridge.onCrosshairMove(JSON.stringify({ active: false }));
+          return;
+        }
+        const payload = {
+          epochSeconds: t,
+          open: candle ? candle.open : barMeta.open,
+          high: candle ? candle.high : barMeta.high,
+          low: candle ? candle.low : barMeta.low,
+          close: candle ? candle.close : barMeta.close,
+          volume: barMeta ? barMeta.volume : null,
+          ema9: indLookup.ema9.get(t) ?? null,
+          ema21: indLookup.ema21.get(t) ?? null,
+          sma50: indLookup.sma50.get(t) ?? null,
+          sma200: indLookup.sma200.get(t) ?? null,
+          rmaFast: indLookup.rmaFast.get(t) ?? null,
+          rmaSlow: indLookup.rmaSlow.get(t) ?? null,
+          vwap: indLookup.vwap.get(t) ?? null,
+          rsi: indLookup.rsi.get(t) ?? null,
+          active: true
+        };
+        bridge.onCrosshairMove(JSON.stringify(payload));
+      });
+
+      function indexMap(points) {
+        const m = new Map();
+        if (points) {
+          for (let i = 0; i < points.length; i++) {
+            m.set(points[i].time, points[i].value);
+          }
+        }
+        return m;
+      }
+
+      window.sqApplyTheme = function (themeJsonStr) {
+        try {
+          const t = JSON.parse(themeJsonStr);
+          document.body.style.background = t.backgroundColor;
+          rsiContainer.style.borderTopColor = t.borderColor;
+          const common = {
+            layout: { background: { color: t.backgroundColor }, textColor: t.textColor },
+            grid: { vertLines: { color: t.gridColor }, horzLines: { color: t.gridColor } },
+            rightPriceScale: { borderColor: t.borderColor },
+            timeScale: { borderColor: t.borderColor }
+          };
+          mainChart.applyOptions(common);
+          rsiChart.applyOptions(common);
+          candleSeries.applyOptions({
+            upColor: t.upColor,
+            downColor: t.downColor,
+            borderUpColor: t.upColor,
+            borderDownColor: t.downColor,
+            wickUpColor: t.upColor,
+            wickDownColor: t.downColor
+          });
+          rsiSeries.applyOptions({ color: t.accentColor });
+        } catch (e) {}
+      };
+
+      window.sqSetChartData = function (payloadJsonStr) {
+        try {
+          const data = JSON.parse(payloadJsonStr);
+          candleSeries.setData(data.candles || []);
+          volumeSeries.setData(data.volume || []);
+
+          barLookup = new Map();
+          const cArr = data.candles || [];
+          const vArr = data.volume || [];
+          const vByTime = new Map();
+          for (let i = 0; i < vArr.length; i++) vByTime.set(vArr[i].time, Math.round(vArr[i].value));
+          for (let i = 0; i < cArr.length; i++) {
+            const c = cArr[i];
+            barLookup.set(c.time, { open: c.open, high: c.high, low: c.low, close: c.close, volume: vByTime.get(c.time) || 0 });
+          }
+
+          ema9Series.setData(data.ema9 || []);
+          ema21Series.setData(data.ema21 || []);
+          sma50Series.setData(data.sma50 || []);
+          sma200Series.setData(data.sma200 || []);
+          rmaFastSeries.setData(data.rmaFast || []);
+          rmaSlowSeries.setData(data.rmaSlow || []);
+          vwapSeries.setData(data.vwap || []);
+
+          indLookup.ema9 = indexMap(data.ema9);
+          indLookup.ema21 = indexMap(data.ema21);
+          indLookup.sma50 = indexMap(data.sma50);
+          indLookup.sma200 = indexMap(data.sma200);
+          indLookup.rmaFast = indexMap(data.rmaFast);
+          indLookup.rmaSlow = indexMap(data.rmaSlow);
+          indLookup.vwap = indexMap(data.vwap);
+          indLookup.rsi = indexMap(data.rsi);
+
+          const hasRsi = data.rsiMode && data.rsiMode !== 'OFF' && data.rsi && data.rsi.length > 0;
+          rsiContainer.style.display = hasRsi ? 'block' : 'none';
+          if (hasRsi) {
+            rsiSeries.setData(data.rsi);
+            syncRsiGuides(data.rsiMode);
+          } else {
+            rsiSeries.setData([]);
+          }
+          resizeCharts();
+
+          if (data.fitContent) {
+            mainChart.timeScale().fitContent();
+          }
+          if (hasRsi) {
+            const lr = mainChart.timeScale().getVisibleLogicalRange();
+            if (lr) {
+              isSyncingRange = true;
+              try { rsiChart.timeScale().setVisibleLogicalRange(lr); } catch (e) {}
+              isSyncingRange = false;
+            }
+          }
+        } catch (e) {}
+      };
+
+      window.sqUpdateLiveBar = function (barJsonStr) {
+        try {
+          const update = JSON.parse(barJsonStr);
+          if (update.candle) {
+            candleSeries.update(update.candle);
+            const c = update.candle;
+            const prevMeta = barLookup.get(c.time);
+            barLookup.set(c.time, {
+              open: c.open,
+              high: c.high,
+              low: c.low,
+              close: c.close,
+              volume: update.volume ? Math.round(update.volume.value) : (prevMeta ? prevMeta.volume : 0)
+            });
+          }
+          if (update.volume) {
+            volumeSeries.update(update.volume);
+          }
+        } catch (e) {}
+      };
+
+      window.sqSetPriceLines = function (linesJsonStr) {
+        try {
+          activePriceLines.forEach(function (pl) {
+            try { candleSeries.removePriceLine(pl); } catch (e) {}
+          });
+          activePriceLines = [];
+          const lines = JSON.parse(linesJsonStr) || [];
+          for (let i = 0; i < lines.length; i++) {
+            const item = lines[i];
+            const created = candleSeries.createPriceLine({
+              price: item.price,
+              color: item.color,
+              lineWidth: item.lineWidth || 1,
+              lineStyle: item.dashed ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
+              axisLabelVisible: true,
+              title: item.title || ''
+            });
+            activePriceLines.push(created);
+          }
+        } catch (e) {}
+      };
+
+      resizeCharts();
+      if (window.SchwabQuantChartBridge && window.SchwabQuantChartBridge.onChartReady) {
+        window.SchwabQuantChartBridge.onChartReady();
+      }
+    })();
+  </script>
+</body>
+</html>
