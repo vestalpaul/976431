@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -92,11 +93,13 @@ class OrderTicketViewModel @Inject constructor(
     private var draftRevision: Long = 0L
     private var lastReviewedDraft: OrderDraft? = null
     private var lastReviewedRevision: Long = -1L
+    private var lastReviewedExecutionMode: ExecutionMode? = null
 
     private fun invalidateReviewedDraft() {
         draftRevision++
         lastReviewedDraft = null
         lastReviewedRevision = -1L
+        lastReviewedExecutionMode = null
     }
 
     val uiState: StateFlow<OrderTicketUiState> = combine(
@@ -115,6 +118,24 @@ class OrderTicketViewModel @Inject constructor(
     )
 
     init {
+        viewModelScope.launch {
+            var previousMode: ExecutionMode? = null
+            preferences.executionMode.collect { mode ->
+                if (previousMode != null && previousMode != mode) {
+                    invalidateReviewedDraft()
+                    editState.update {
+                        it.copy(
+                            pendingRiskAssessment = null,
+                            overriddenRiskCodes = emptyList(),
+                            readyForBiometricSwipe = false,
+                            isSubmitting = false,
+                            swipeResetCounter = it.swipeResetCounter + 1
+                        )
+                    }
+                }
+                previousMode = mode
+            }
+        }
         viewModelScope.launch {
             stagedOrderHolder.activeOrderDraft.collect { draft ->
                 if (draft != null) {
@@ -326,7 +347,7 @@ class OrderTicketViewModel @Inject constructor(
         } else {
             current.ocoStopPriceInput
         }
-        val walkUpAllowed = isWalkUpAllowed(category, updatedOrderType, current.replacePriorOrderId)
+        val walkUpAllowed = isWalkUpAllowed(category, updatedOrderType, null)
         invalidateReviewedDraft()
 
         editState.value = current.copy(
@@ -338,6 +359,8 @@ class OrderTicketViewModel @Inject constructor(
             ocoStopPriceInput = derivedOcoSl,
             legs = updatedLegs,
             walkUpEnabled = if (walkUpAllowed) current.walkUpEnabled else false,
+            replacePriorOrderId = null,
+            isEscalatedReprice = false,
             pendingRiskAssessment = null,
             readyForBiometricSwipe = false
         )
@@ -351,12 +374,16 @@ class OrderTicketViewModel @Inject constructor(
         } else {
             s.legs
         }
+        val walkUpAllowed = isWalkUpAllowed(s.strategyCategory, s.orderType, null)
         invalidateReviewedDraft()
         editState.value = s.copy(
             underlyingSymbol = clean,
             ocoTakeProfitInput = "",
             ocoStopPriceInput = "",
             legs = updatedLegs,
+            walkUpEnabled = if (walkUpAllowed) s.walkUpEnabled else false,
+            replacePriorOrderId = null,
+            isEscalatedReprice = false,
             pendingRiskAssessment = null,
             readyForBiometricSwipe = false
         )
@@ -369,9 +396,13 @@ class OrderTicketViewModel @Inject constructor(
         } else {
             s.legs
         }
+        val walkUpAllowed = isWalkUpAllowed(s.strategyCategory, s.orderType, null)
         invalidateReviewedDraft()
         editState.value = s.copy(
             legs = updatedLegs,
+            walkUpEnabled = if (walkUpAllowed) s.walkUpEnabled else false,
+            replacePriorOrderId = null,
+            isEscalatedReprice = false,
             pendingRiskAssessment = null,
             readyForBiometricSwipe = false
         )
@@ -395,9 +426,13 @@ class OrderTicketViewModel @Inject constructor(
             quantity = qty,
             underlyingSymbol = cleanSym
         )
+        val walkUpAllowed = isWalkUpAllowed(s.strategyCategory, s.orderType, null)
         invalidateReviewedDraft()
         editState.value = s.copy(
             legs = listOf(updatedFirst) + s.legs.drop(1),
+            walkUpEnabled = if (walkUpAllowed) s.walkUpEnabled else false,
+            replacePriorOrderId = null,
+            isEscalatedReprice = false,
             pendingRiskAssessment = null,
             readyForBiometricSwipe = false
         )
@@ -560,28 +595,39 @@ class OrderTicketViewModel @Inject constructor(
         val revisionAtStart = draftRevision
         val draft = buildCurrentDraft()
         viewModelScope.launch {
-            val isLive = preferences.isLiveMode.first()
-            val source = if (isLive) {
+            val isLiveAtStart = preferences.isLiveMode.first()
+            val modeAtStart = if (isLiveAtStart) ExecutionMode.LIVE else ExecutionMode.SHADOW
+            val source = if (isLiveAtStart) {
                 PortfolioDataSource.LIVE_SCHWAB_READ_ONLY
             } else {
                 PortfolioDataSource.SHADOW_PAPER_LEDGER
             }
             var snapshot = portfolioRepository.observePortfolioSnapshot(source).first()
             // M-4 Safeguard: Auto-fetch live portfolio telemetry before claiming 0 risk warnings
-            if (isLive && snapshot == null) {
+            if (isLiveAtStart && snapshot == null) {
                 snapshot = portfolioRepository.refreshLivePortfolio().getOrNull()
             }
             val assessment = evaluatePreTradeRisksUseCase(
                 draft = draft,
                 snapshot = snapshot,
-                requirePortfolioTelemetry = isLive
+                requirePortfolioTelemetry = isLiveAtStart
             )
-            // MEDIUM-2 Safeguard: Discard stale risk assessment if any form field mutated in flight
-            if (draftRevision != revisionAtStart) {
+            val currentModeNow = if (preferences.isLiveMode.first()) ExecutionMode.LIVE else ExecutionMode.SHADOW
+            // MEDIUM-2 Safeguard: Discard stale risk assessment if any form field or execution mode mutated in flight
+            if (draftRevision != revisionAtStart || currentModeNow != modeAtStart) {
+                invalidateReviewedDraft()
+                editState.update {
+                    it.copy(
+                        pendingRiskAssessment = null,
+                        overriddenRiskCodes = emptyList(),
+                        readyForBiometricSwipe = false
+                    )
+                }
                 return@launch
             }
             lastReviewedDraft = draft
             lastReviewedRevision = revisionAtStart
+            lastReviewedExecutionMode = modeAtStart
             if (assessment.hasWarnings) {
                 editState.value = editState.value.copy(
                     pendingRiskAssessment = assessment,
@@ -602,8 +648,9 @@ class OrderTicketViewModel @Inject constructor(
     }
 
     fun acknowledgeRisksAndContinue() {
-        if (draftRevision != lastReviewedRevision || lastReviewedDraft == null) {
-            editState.value = editState.value.copy(
+        val currentForm = editState.value
+        if (draftRevision != lastReviewedRevision || lastReviewedDraft == null || lastReviewedExecutionMode == null) {
+            editState.value = currentForm.copy(
                 pendingRiskAssessment = null,
                 overriddenRiskCodes = emptyList(),
                 readyForBiometricSwipe = false,
@@ -611,8 +658,8 @@ class OrderTicketViewModel @Inject constructor(
             )
             return
         }
-        val codes = editState.value.pendingRiskAssessment?.overriddenCodes.orEmpty()
-        editState.value = editState.value.copy(
+        val codes = currentForm.pendingRiskAssessment?.overriddenCodes.orEmpty()
+        editState.value = currentForm.copy(
             pendingRiskAssessment = null,
             overriddenRiskCodes = codes,
             readyForBiometricSwipe = true
@@ -620,25 +667,41 @@ class OrderTicketViewModel @Inject constructor(
     }
 
     fun onBiometricSwipeCompleted(activity: FragmentActivity?) {
-        val current = uiState.value
+        val current = editState.value
         if (current.isSubmitting) return
 
         val expectedRevision = lastReviewedRevision
         val reviewedDraft = lastReviewedDraft
-        if (reviewedDraft == null || draftRevision != expectedRevision) {
-            editState.value = editState.value.copy(
+        val reviewedMode = lastReviewedExecutionMode
+        if (reviewedDraft == null || reviewedMode == null || draftRevision != expectedRevision) {
+            editState.value = current.copy(
                 pendingRiskAssessment = null,
                 overriddenRiskCodes = emptyList(),
                 readyForBiometricSwipe = false,
-                swipeResetCounter = editState.value.swipeResetCounter + 1,
+                swipeResetCounter = current.swipeResetCounter + 1,
                 globalMessage = "Order ticket modified after risk review; tap Review & Submit again."
             )
             return
         }
 
+        // Set isSubmitting synchronously BEFORE launching coroutine to prevent rapid double-swipe races
+        editState.value = current.copy(isSubmitting = true)
+
         viewModelScope.launch {
-            editState.value = editState.value.copy(isSubmitting = true)
-            val isLive = preferences.isLiveMode.first()
+            val isLiveBeforeAuth = preferences.isLiveMode.first()
+            val modeBeforeAuth = if (isLiveBeforeAuth) ExecutionMode.LIVE else ExecutionMode.SHADOW
+            if (modeBeforeAuth != reviewedMode || draftRevision != expectedRevision) {
+                invalidateReviewedDraft()
+                editState.value = editState.value.copy(
+                    isSubmitting = false,
+                    pendingRiskAssessment = null,
+                    overriddenRiskCodes = emptyList(),
+                    readyForBiometricSwipe = false,
+                    swipeResetCounter = editState.value.swipeResetCounter + 1,
+                    globalMessage = "Execution mode or ticket changed after review; tap Review & Submit again."
+                )
+                return@launch
+            }
 
             val authPassed = if (biometricGate.canAuthenticate()) {
                 if (activity == null) {
@@ -649,7 +712,7 @@ class OrderTicketViewModel @Inject constructor(
                     )
                     return@launch
                 }
-                val promptTitle = if (isLive) "Authorize LIVE Schwab Order" else "Authorize SHADOW Paper Order"
+                val promptTitle = if (isLiveBeforeAuth) "Authorize LIVE Schwab Order" else "Authorize SHADOW Paper Order"
                 val promptSubtitle = "${current.underlyingSymbol} ${current.strategyCategory.displayName}"
                 when (val result = biometricGate.authenticate(activity, promptTitle, promptSubtitle)) {
                     is BiometricAuthResult.Succeeded -> true
@@ -670,7 +733,7 @@ class OrderTicketViewModel @Inject constructor(
                         false
                     }
                 }
-            } else if (isLive) {
+            } else if (isLiveBeforeAuth) {
                 // Never bypass Biometric verification for Live orders
                 editState.value = editState.value.copy(
                     isSubmitting = false,
@@ -685,20 +748,23 @@ class OrderTicketViewModel @Inject constructor(
 
             if (!authPassed) return@launch
 
-            if (draftRevision != expectedRevision) {
+            val isLive = preferences.isLiveMode.first()
+            val modeAfterAuth = if (isLive) ExecutionMode.LIVE else ExecutionMode.SHADOW
+            if (draftRevision != expectedRevision || modeAfterAuth != reviewedMode) {
+                invalidateReviewedDraft()
                 editState.value = editState.value.copy(
                     isSubmitting = false,
                     pendingRiskAssessment = null,
                     overriddenRiskCodes = emptyList(),
                     readyForBiometricSwipe = false,
                     swipeResetCounter = editState.value.swipeResetCounter + 1,
-                    globalMessage = "Order ticket changed during biometric confirmation; review again."
+                    globalMessage = "Order ticket or execution mode changed during biometric confirmation; review again."
                 )
                 return@launch
             }
 
             val draft = reviewedDraft
-            val mode = if (isLive) ExecutionMode.LIVE else ExecutionMode.SHADOW
+            val mode = reviewedMode
             // Guard 1: Never pass "SHADOW_PAPER" onto a Live ticket
             val accountHash = if (isLive) {
                 credentialVault.getPrimaryAccountHash()
@@ -870,6 +936,18 @@ class OrderTicketViewModel @Inject constructor(
             if (sl == null) {
                 return "Enter a valid positive OCO stop price."
             }
+            val side = form.legs.firstOrNull()?.side ?: OrderSide.SELL
+            val roundedTp = tp.setScale(2, RoundingMode.HALF_UP)
+            val roundedSl = sl.setScale(2, RoundingMode.HALF_UP)
+            if (side == OrderSide.SELL) {
+                if (roundedTp <= roundedSl) {
+                    return "OCO SELL take-profit limit ($roundedTp) must be strictly greater than stop price ($roundedSl)."
+                }
+            } else {
+                if (roundedTp >= roundedSl) {
+                    return "OCO ${side.name} take-profit limit ($roundedTp) must be strictly less than stop price ($roundedSl)."
+                }
+            }
             return null
         }
         val needsLimit = form.orderType in setOf(
@@ -973,8 +1051,8 @@ class OrderTicketViewModel @Inject constructor(
             knownEarningsDateIso = base?.knownEarningsDateIso,
             sourceLabel = s.sourceLabel,
             simulateImmediateMidFill = s.simulateImmediateMidFill,
-            replacePriorOrderId = s.replacePriorOrderId ?: base?.replacePriorOrderId,
-            isEscalatedReprice = s.isEscalatedReprice || (base?.isEscalatedReprice == true)
+            replacePriorOrderId = s.replacePriorOrderId,
+            isEscalatedReprice = s.isEscalatedReprice
         )
     }
 

@@ -156,4 +156,59 @@ class GeneratePortfolioAdviceUseCaseTest {
         assertTrue(cards.any { it.title.contains("Negative Settled Cash") })
         assertTrue(cards.any { it.title.contains("Low Cash Reserve") })
     }
+
+    @Test
+    fun `MEDIUM-4 excludes CASH and INDEX groups from Ticker Concentration, Trim Shares, and Sector Concentration advice`() {
+        val cashPos = Position(
+            symbol = "SWVXX",
+            underlyingSymbol = "SWVXX",
+            category = AssetCategory.CASH,
+            quantity = BigDecimal("45000"),
+            averageCost = BigDecimal("1.00"),
+            markPrice = BigDecimal("1.00"),
+            marketValue = BigDecimal("45000.00"),
+            unrealizedPnl = BigDecimal.ZERO,
+            unrealizedPnlPercent = 0.0
+        )
+        val indexPos = Position(
+            symbol = "\$SPX.X",
+            underlyingSymbol = "\$SPX.X",
+            category = AssetCategory.INDEX,
+            quantity = BigDecimal("5"),
+            averageCost = BigDecimal("5800.00"),
+            markPrice = BigDecimal("5800.00"),
+            marketValue = BigDecimal("29000.00"),
+            unrealizedPnl = BigDecimal.ZERO,
+            unrealizedPnlPercent = 0.0
+        )
+        val snapshot = PortfolioSnapshot(
+            dataSource = PortfolioDataSource.LIVE_SCHWAB_READ_ONLY,
+            accountSummary = AccountSummary(
+                accountHash = "LIVE_1",
+                maskedAccountNumber = "1234",
+                executionMode = ExecutionMode.LIVE,
+                netLiquidationValue = BigDecimal("100000.00"),
+                cashBalance = BigDecimal("26000.00"),
+                settledCash = BigDecimal("26000.00"),
+                cashBufferPercent = 26.0,
+                buyingPower = BigDecimal("50000.00"),
+                optionBuyingPower = BigDecimal("26000.00"),
+                dayPnl = BigDecimal.ZERO,
+                dayPnlPercent = 0.0,
+                portfolioSpyBetaWeightedDelta = 0.0,
+                updatedAtEpochMs = 1L
+            ),
+            positions = listOf(cashPos, indexPos),
+            groups = listOf(
+                UnderlyingPositionGroup("SWVXX", 1.0, 0.0, BigDecimal("45000.00"), 45.0, BigDecimal.ZERO, BigDecimal.ZERO, 0.0, 0.0, listOf(cashPos)),
+                UnderlyingPositionGroup("\$SPX.X", 5800.0, 0.0, BigDecimal("29000.00"), 29.0, BigDecimal.ZERO, BigDecimal.ZERO, 0.0, 0.0, listOf(indexPos))
+            ),
+            aggregatedGreeks = AggregatedGreeks(),
+            spySpot = 585.0
+        )
+
+        val cards = useCase.generateAdviceCards(snapshot)
+        assertTrue(cards.none { it.title.contains("Concentration", ignoreCase = true) })
+        assertTrue(cards.none { it.recommendedActionLabel == "Trim Shares" })
+    }
 }

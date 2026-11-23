@@ -20,6 +20,7 @@ import com.schwabquant.app.core.quant.SelectedChainLeg
 import com.schwabquant.app.core.quant.SpreadDraftAssembler
 import com.schwabquant.app.core.quant.StrikeWindowFilter
 import com.schwabquant.app.core.quant.VolRankCalculator
+import com.schwabquant.app.core.security.DeepLinkIntentSanitizer
 import com.schwabquant.app.data.local.prefs.AppPreferencesDataStore
 import com.schwabquant.app.data.remote.dto.SchwabQuoteNormalizer
 import com.schwabquant.app.data.remote.dto.SchwabSymbolNormalizer
@@ -74,7 +75,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.math.BigDecimal
-import java.math.RoundingMode
 import java.time.LocalDate
 import java.util.Locale
 import javax.inject.Inject
@@ -155,7 +155,22 @@ class MarketDetailViewModel @Inject constructor(
         savedStateHandle.get<String>(NavRoutes.MARKET_DETAIL_ARG_SYMBOL).orEmpty()
     )
 
-    private val _state = MutableStateFlow(MarketDetailUiState(symbol = initialSymbol))
+    private val initialSeedCandles = demoChartCandleProvider.buildDemoCandles(initialSymbol, ChartTimeframe.D1)
+    private val initialSeedIndicators = indicatorCalculator.computeAll(
+        candles = initialSeedCandles,
+        includeSessionVwap = false
+    )
+
+    private val _state = MutableStateFlow(
+        MarketDetailUiState(
+            symbol = initialSymbol,
+            isLoadingChart = false,
+            spotPrice = initialSeedCandles.lastOrNull()?.close ?: 0.0,
+            candles = initialSeedCandles,
+            chartResetCounter = 1,
+            indicators = initialSeedIndicators
+        )
+    )
     val uiState: StateFlow<MarketDetailUiState> = _state
 
     private val activeSymbolFlow = MutableStateFlow(initialSymbol)
@@ -422,12 +437,10 @@ class MarketDetailViewModel @Inject constructor(
         triggerPriceText: String,
         quantityText: String
     ) {
-        val triggerPrice = triggerPriceText.trim().toBigDecimalOrNull()
-            ?.takeIf { it > BigDecimal.ZERO }
-            ?.setScale(2, RoundingMode.HALF_UP)
+        val triggerPrice = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(triggerPriceText)
         val quantity = quantityText.trim().toIntOrNull()?.takeIf { it > 0 }
         if (triggerPrice == null || quantity == null) {
-            postMessage("Enter a positive trigger price and share quantity.")
+            postMessage("Enter a positive trigger price (>= 0.01) and share quantity.")
             return
         }
         viewModelScope.launch {
@@ -476,7 +489,7 @@ class MarketDetailViewModel @Inject constructor(
     private fun updateOverlaySubscriptionState() {
         if (!isScreenVisible) return
         val sym = _state.value.symbol
-        if (authRepository.observeAuthState().let { _state.value.isLiveMarketData }) {
+        if (_state.value.isLiveMarketData) {
             streamerClient.setChartOverlaySymbol(sym)
         } else {
             streamerClient.setChartOverlaySymbol(null)

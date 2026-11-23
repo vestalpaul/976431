@@ -3,6 +3,7 @@ package com.schwabquant.app.presentation.sentinel
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.schwabquant.app.core.security.DeepLinkIntentSanitizer
 import com.schwabquant.app.data.local.entity.AuditLogEntity
 import com.schwabquant.app.data.local.prefs.AppPreferencesDataStore
 import com.schwabquant.app.data.remote.dto.SchwabSymbolNormalizer
@@ -39,8 +40,6 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.math.BigDecimal
-import java.math.RoundingMode
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.floor
@@ -199,9 +198,9 @@ class SentinelViewModel @Inject constructor(
             setFeedback("Enter a valid equity symbol (e.g., GOOG, SPY, BRK.B).", isError = true)
             return false
         }
-        val triggerBd = input.triggerPrice.trim().toBigDecimalOrNull()
-        if (triggerBd == null || triggerBd <= BigDecimal.ZERO) {
-            setFeedback("Enter a valid positive trigger price.", isError = true)
+        val triggerBd = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(input.triggerPrice)
+        if (triggerBd == null) {
+            setFeedback("Enter a valid positive trigger price (>= 0.01).", isError = true)
             return false
         }
         val qty = input.quantity.trim().toIntOrNull()
@@ -222,7 +221,7 @@ class SentinelViewModel @Inject constructor(
             symbol = cleanSym,
             category = AssetCategory.EQUITY,
             ruleType = input.ruleType,
-            triggerPrice = triggerBd.setScale(2, RoundingMode.HALF_UP),
+            triggerPrice = triggerBd,
             quantity = qty,
             slippageCollarPct = collar,
             holdSeconds = holdSec,

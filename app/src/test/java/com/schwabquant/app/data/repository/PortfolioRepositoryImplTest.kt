@@ -292,6 +292,98 @@ class PortfolioRepositoryImplTest {
         assertEquals("BRK.B", snapshot.groups.first().underlyingSymbol)
     }
 
+    @Test
+    fun `MEDIUM-4 classifies CASH_EQUIVALENT FIXED_INCOME MUTUAL_FUND CURRENCY and INDEX with zero delta and no concentration flag`() = runTest {
+        val traderApi = io.mockk.mockk<com.schwabquant.app.data.remote.api.SchwabTraderApi>()
+        val marketDataRepo = io.mockk.mockk<com.schwabquant.app.domain.repository.MarketDataRepository>()
+        val blackScholes = com.schwabquant.app.core.quant.BlackScholesEngine()
+        val repo = PortfolioRepositoryImpl(
+            traderApi = traderApi,
+            marketDataRepository = marketDataRepo,
+            shadowLedgerDao = io.mockk.mockk(relaxed = true),
+            washSaleDao = io.mockk.mockk(relaxed = true),
+            credentialVault = FakeVault("hash-assets"),
+            preferences = io.mockk.mockk(relaxed = true),
+            blackScholesEngine = blackScholes,
+            betaWeightingCalculator = com.schwabquant.app.core.quant.BetaWeightingCalculator(blackScholes),
+            occSymbolFormatter = com.schwabquant.app.core.quant.OccSymbolFormatter()
+        )
+
+        io.mockk.coEvery { traderApi.getAccount("hash-assets", fields = "positions") } returns com.schwabquant.app.data.remote.dto.AccountWrapperDto(
+            securitiesAccount = com.schwabquant.app.data.remote.dto.SecuritiesAccountDto(
+                accountNumber = "12345678",
+                type = "MARGIN",
+                currentBalances = com.schwabquant.app.data.remote.dto.BalancesDto(
+                    liquidationValue = 100_000.0,
+                    cashBalance = 5_000.0,
+                    settledFunds = 5_000.0,
+                    buyingPower = 100_000.0
+                ),
+                positions = listOf(
+                    com.schwabquant.app.data.remote.dto.PositionDto(
+                        longQuantity = 40_000.0,
+                        averagePrice = 1.0,
+                        marketValue = 40_000.0,
+                        instrument = com.schwabquant.app.data.remote.dto.InstrumentDto(
+                            symbol = "SWVXX",
+                            assetType = "MUTUAL_FUND"
+                        )
+                    ),
+                    com.schwabquant.app.data.remote.dto.PositionDto(
+                        longQuantity = 30_000.0,
+                        averagePrice = 1.0,
+                        marketValue = 30_000.0,
+                        instrument = com.schwabquant.app.data.remote.dto.InstrumentDto(
+                            symbol = "TBILL_MM",
+                            assetType = "CASH_EQUIVALENT"
+                        )
+                    ),
+                    com.schwabquant.app.data.remote.dto.PositionDto(
+                        longQuantity = 5.0,
+                        averagePrice = 5800.0,
+                        marketValue = 29_000.0,
+                        instrument = com.schwabquant.app.data.remote.dto.InstrumentDto(
+                            symbol = "\$SPX.X",
+                            assetType = "INDEX"
+                        )
+                    )
+                )
+            )
+        )
+        io.mockk.coEvery { marketDataRepo.getQuotes(any(), any()) } returns Result.success(
+            mapOf(
+                "SPY" to com.schwabquant.app.data.remote.dto.QuoteEntryDto(
+                    symbol = "SPY",
+                    quote = com.schwabquant.app.data.remote.dto.QuoteDetailDto(mark = 585.0, lastPrice = 585.0),
+                    fundamental = com.schwabquant.app.data.remote.dto.FundamentalDto(beta = 1.0)
+                )
+            )
+        )
+
+        val snapshot = repo.refreshLivePortfolio("hash-assets").getOrThrow()
+        assertEquals(AssetCategory.CASH, PortfolioRepositoryImpl.classifyAssetCategory("CASH_EQUIVALENT"))
+        assertEquals(AssetCategory.CASH, PortfolioRepositoryImpl.classifyAssetCategory("FIXED_INCOME"))
+        assertEquals(AssetCategory.CASH, PortfolioRepositoryImpl.classifyAssetCategory("MUTUAL_FUND"))
+        assertEquals(AssetCategory.CASH, PortfolioRepositoryImpl.classifyAssetCategory("CURRENCY"))
+        assertEquals(AssetCategory.INDEX, PortfolioRepositoryImpl.classifyAssetCategory("INDEX"))
+        assertEquals(AssetCategory.EQUITY, PortfolioRepositoryImpl.classifyAssetCategory("COLLECTIVE_INVESTMENT"))
+
+        val swvxx = snapshot.positions.first { it.symbol == "SWVXX" }
+        val tbill = snapshot.positions.first { it.symbol == "TBILL_MM" }
+        val spx = snapshot.positions.first { it.symbol == "\$SPX.X" }
+        assertEquals(AssetCategory.CASH, swvxx.category)
+        assertEquals(AssetCategory.CASH, tbill.category)
+        assertEquals(AssetCategory.INDEX, spx.category)
+        assertEquals(0.0, swvxx.delta!!, 1e-9)
+        assertEquals(0.0, tbill.betaToSpy!!, 1e-9)
+        assertEquals(0.0, spx.delta!!, 1e-9)
+        assertEquals(0.0, snapshot.aggregatedGreeks.spyBetaWeightedDelta, 1e-9)
+        assertTrue(
+            snapshot.portfolioAnomalies.none { it.type == com.schwabquant.app.domain.model.PortfolioAnomalyType.CONCENTRATION_OVER_25_PCT },
+            "CASH & INDEX groups above 25% weight must not emit CONCENTRATION_OVER_25_PCT"
+        )
+    }
+
     private class FakeVault(private val hash: String) : CredentialVault {
         private val flow = MutableStateFlow(
             StoredAuthSnapshot(

@@ -787,6 +787,7 @@ class MidPriceWalkUpController(
             }.getOrElse { Result.failure(it) }
             if (res.isSuccess) {
                 ctx.cancelError = null
+                ctx.settleWaitNeeded = true
                 val afterCancelSnap = orderRepository.getOrderStatus(ctx.accountHash, ctx.orderId).getOrNull()
                 if (afterCancelSnap != null && applyTerminalBrokerSnapshotOnCancel(ctx, afterCancelSnap)) {
                     return

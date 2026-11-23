@@ -106,4 +106,24 @@ class ChartTimeframeMapperTest {
         assertEquals(107.5, hour10.close, 0.001)
         assertEquals(5_500L, hour10.volume)
     }
+
+    @Test
+    fun `Workstream A builds deterministic DemoChartCandles across timeframes and encodes marketDetail route safely on JVM`() {
+        val candleProvider = com.schwabquant.app.data.repository.DemoChartCandleProvider()
+        ChartTimeframe.entries.forEach { tf ->
+            val bars = candleProvider.buildDemoCandles("BRK.B", tf)
+            assertTrue(bars.isNotEmpty(), "Expected non-empty demo candles for $tf")
+            assertTrue(bars.zipWithNext().all { (a, b) -> a.epochSeconds < b.epochSeconds })
+            assertTrue(bars.all { it.high >= it.low && it.high >= it.open && it.high >= it.close })
+        }
+
+        assertEquals(
+            "market/BRK.B",
+            com.schwabquant.app.presentation.navigation.NavRoutes.marketDetail("brk/b")
+        )
+        assertEquals(
+            "market/SPY",
+            com.schwabquant.app.presentation.navigation.NavRoutes.marketDetail("   ")
+        )
+    }
 }

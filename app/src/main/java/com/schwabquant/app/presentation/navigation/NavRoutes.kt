@@ -9,6 +9,7 @@ import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.ui.graphics.vector.ImageVector
 
 import com.schwabquant.app.data.remote.dto.SchwabSymbolNormalizer
+import java.net.URLEncoder
 
 object NavRoutes {
     const val DASHBOARD = "dashboard"
@@ -22,7 +23,7 @@ object NavRoutes {
 
     fun marketDetail(rawSymbol: String): String {
         val clean = SchwabSymbolNormalizer.toDisplaySymbol(rawSymbol).ifBlank { "SPY" }
-        return "market/${android.net.Uri.encode(clean)}"
+        return "market/${URLEncoder.encode(clean, Charsets.UTF_8.name())}"
     }
 
     val VALID_ROUTES: Set<String> = setOf(

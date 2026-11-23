@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -53,6 +54,8 @@ fun ChartTabContent(
     val themePayload = remember(themeType) { ChartThemeMapper.fromAppTheme(themeType) }
     val chartDataPayload = remember(
         state.chartResetCounter,
+        state.candles.size,
+        state.candles.lastOrNull()?.epochSeconds,
         state.overlayToggles,
         themePayload
     ) {
@@ -206,6 +209,7 @@ fun ChartTabContent(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
+                .heightIn(min = 320.dp)
         ) {
             LightweightChartWebView(
                 themePayload = themePayload,
@@ -213,7 +217,9 @@ fun ChartTabContent(
                 priceLines = combinedPriceLines,
                 liveBarUpdate = liveBarUpdate,
                 onCrosshairTelemetry = onCrosshairTelemetry,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier
+                    .fillMaxSize()
+                    .heightIn(min = 320.dp)
             )
             if (state.isLoadingChart) {
                 CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))

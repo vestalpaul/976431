@@ -221,8 +221,13 @@ class GeneratePortfolioAdviceUseCase @Inject constructor() {
             )
         }
 
+        val concentrationEligibleGroups = snapshot.groups.filterNot { group ->
+            group.legs.isNotEmpty() &&
+                group.legs.all { it.category == AssetCategory.CASH || it.category == AssetCategory.INDEX }
+        }
+
         // Ticker > 25% concentration
-        snapshot.groups
+        concentrationEligibleGroups
             .filter { it.weightPercent > 25.0 }
             .forEach { group ->
                 val equityLeg = group.legs.firstOrNull {
@@ -269,7 +274,7 @@ class GeneratePortfolioAdviceUseCase @Inject constructor() {
 
         // Sector > 40% concentration
         if (netLiq > 0.0) {
-            snapshot.groups
+            concentrationEligibleGroups
                 .groupBy { TickerSectorMap.sectorFor(it.underlyingSymbol) }
                 .forEach { (sector, groups) ->
                     val sectorWeight = (groups.sumOf { it.totalMarketValue.toDouble() } / netLiq) * 100.0

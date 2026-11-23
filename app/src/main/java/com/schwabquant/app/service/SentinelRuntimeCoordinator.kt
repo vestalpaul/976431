@@ -22,6 +22,7 @@ import com.schwabquant.app.domain.usecase.OvernightAlertPayload
 import com.schwabquant.app.domain.usecase.RuleEvaluationTracker
 import com.schwabquant.app.domain.usecase.SentinelExecutionOutcome
 import com.schwabquant.app.domain.usecase.SentinelExecutionStateMachine
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,9 +33,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+
+data class TrackedRuntimeEvent(
+    val event: SentinelRuntimeEvent,
+    val ack: CompletableDeferred<Unit>? = null
+)
 
 sealed interface SentinelRuntimeEvent {
     data class OrderFilled(
@@ -101,8 +108,22 @@ class SentinelRuntimeCoordinator @Inject constructor(
     private val _runtimeEvents = MutableSharedFlow<SentinelRuntimeEvent>(extraBufferCapacity = 32)
     val runtimeEvents: SharedFlow<SentinelRuntimeEvent> = _runtimeEvents.asSharedFlow()
 
+    private val _trackedRuntimeEvents = MutableSharedFlow<TrackedRuntimeEvent>(extraBufferCapacity = 32)
+    val trackedRuntimeEvents: SharedFlow<TrackedRuntimeEvent> = _trackedRuntimeEvents.asSharedFlow()
+
     private val _activeExecutionCount = MutableStateFlow(0)
     val activeExecutionCount: StateFlow<Int> = _activeExecutionCount.asStateFlow()
+
+    private suspend fun emitRuntimeEventAndAwaitHandled(event: SentinelRuntimeEvent) {
+        _runtimeEvents.emit(event)
+        if (_trackedRuntimeEvents.subscriptionCount.value > 0) {
+            val ack = CompletableDeferred<Unit>()
+            _trackedRuntimeEvents.emit(TrackedRuntimeEvent(event, ack))
+            withTimeoutOrNull(EVENT_HANDLING_ACK_TIMEOUT_MS) {
+                ack.await()
+            }
+        }
+    }
 
     fun updateServiceStatus(transform: (SentinelServiceStatus) -> SentinelServiceStatus) {
         _serviceStatus.value = transform(_serviceStatus.value)
@@ -144,7 +165,7 @@ class SentinelRuntimeCoordinator @Inject constructor(
             )
             clearTracker(rule.id)
         }
-        _runtimeEvents.tryEmit(SentinelRuntimeEvent.OrphanedRulesRecovered(orphaned))
+        emitRuntimeEventAndAwaitHandled(SentinelRuntimeEvent.OrphanedRulesRecovered(orphaned))
         return orphaned
     }
 
@@ -254,7 +275,7 @@ class SentinelRuntimeCoordinator @Inject constructor(
                                     message = note
                                 )
                                 trackers.remove(rule.id)
-                                _runtimeEvents.emit(SentinelRuntimeEvent.OvernightAlert(payload))
+                                emitRuntimeEventAndAwaitHandled(SentinelRuntimeEvent.OvernightAlert(payload))
                             } finally {
                                 inFlightAlertRuleIds.remove(rule.id)
                             }
@@ -312,7 +333,7 @@ class SentinelRuntimeCoordinator @Inject constructor(
         when (outcome) {
             is SentinelExecutionOutcome.Filled -> {
                 trackers.remove(rule.id)
-                _runtimeEvents.emit(
+                emitRuntimeEventAndAwaitHandled(
                     SentinelRuntimeEvent.OrderFilled(
                         ruleId = rule.id,
                         symbol = rule.symbol,
@@ -324,7 +345,7 @@ class SentinelRuntimeCoordinator @Inject constructor(
 
             is SentinelExecutionOutcome.UnfilledEscalated -> {
                 trackers.remove(rule.id)
-                _runtimeEvents.emit(
+                emitRuntimeEventAndAwaitHandled(
                     SentinelRuntimeEvent.UnfilledEscalated(
                         ruleId = rule.id,
                         symbol = rule.symbol,
@@ -339,24 +360,24 @@ class SentinelRuntimeCoordinator @Inject constructor(
             is SentinelExecutionOutcome.StagedAlertOnly -> {
                 trackers.remove(rule.id)
                 if (outcome.payload.isDipBuyAlert) {
-                    _runtimeEvents.emit(SentinelRuntimeEvent.DipBuyAlert(outcome.payload))
+                    emitRuntimeEventAndAwaitHandled(SentinelRuntimeEvent.DipBuyAlert(outcome.payload))
                 } else {
-                    _runtimeEvents.emit(SentinelRuntimeEvent.OvernightAlert(outcome.payload))
+                    emitRuntimeEventAndAwaitHandled(SentinelRuntimeEvent.OvernightAlert(outcome.payload))
                 }
             }
 
             is SentinelExecutionOutcome.AbortedNoPosition -> {
                 trackers.remove(rule.id)
-                _runtimeEvents.emit(SentinelRuntimeEvent.InfoMessage(outcome.reason))
+                emitRuntimeEventAndAwaitHandled(SentinelRuntimeEvent.InfoMessage(outcome.reason))
             }
 
             is SentinelExecutionOutcome.RejectedOvernight -> {
-                _runtimeEvents.emit(SentinelRuntimeEvent.InfoMessage(outcome.reason))
+                emitRuntimeEventAndAwaitHandled(SentinelRuntimeEvent.InfoMessage(outcome.reason))
             }
 
             is SentinelExecutionOutcome.Failed -> {
                 trackers.remove(rule.id)
-                _runtimeEvents.emit(SentinelRuntimeEvent.InfoMessage(outcome.reason))
+                emitRuntimeEventAndAwaitHandled(SentinelRuntimeEvent.InfoMessage(outcome.reason))
             }
 
             is SentinelExecutionOutcome.AlreadyInProgress -> Unit
@@ -584,6 +605,13 @@ class SentinelRuntimeCoordinator @Inject constructor(
                 IllegalStateException("Tick Replay Simulator is strictly disabled in LIVE mode.")
             )
         }
+        if (rule.executionMode != ExecutionMode.SHADOW) {
+            return Result.failure(
+                IllegalStateException(
+                    "Tick Replay Simulator only allows SHADOW-mode rules (blocked ${rule.executionMode.name} rule #${rule.id})."
+                )
+            )
+        }
         val activeRule = if (rule.status != SentinelRuleStatus.ARMED) {
             sentinelRepository.updateRuleStatusWithNote(rule.id, SentinelRuleStatus.ARMED, null)
             rule.copy(status = SentinelRuleStatus.ARMED, lastTriggerNote = null)
@@ -597,5 +625,6 @@ class SentinelRuntimeCoordinator @Inject constructor(
 
     companion object {
         const val ORPHANED_EXECUTING_NOTE = "Interrupted mid-exit — verify position/orders"
+        private const val EVENT_HANDLING_ACK_TIMEOUT_MS = 2_000L
     }
 }

@@ -93,8 +93,12 @@ fun SentinelScreen(
         state.rules.count { it.status == SentinelRuleStatus.ARMED }
     }
 
-    val activeSimRule = remember(state.rules, selectedSimRuleId) {
-        state.rules.firstOrNull { it.id == selectedSimRuleId } ?: state.rules.firstOrNull()
+    val shadowSimRules = remember(state.rules) {
+        state.rules.filter { it.executionMode == ExecutionMode.SHADOW }
+    }
+
+    val activeSimRule = remember(shadowSimRules, selectedSimRuleId) {
+        shadowSimRules.firstOrNull { it.id == selectedSimRuleId } ?: shadowSimRules.firstOrNull()
     }
 
     LazyColumn(
@@ -273,7 +277,7 @@ fun SentinelScreen(
         if (state.executionMode == ExecutionMode.SHADOW) {
             item {
                 ShadowTickReplaySimulatorCard(
-                    rules = state.rules,
+                    rules = shadowSimRules,
                     selectedRule = activeSimRule,
                     onSelectRule = { selectedSimRuleId = it.id },
                     onSimulateWick = { rule -> viewModel.simulateStopHuntWick(rule) },

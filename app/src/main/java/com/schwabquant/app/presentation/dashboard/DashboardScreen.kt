@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -125,6 +126,10 @@ fun DashboardScreen(
                         onSelectSource = viewModel::selectDataSource,
                         onRefresh = { viewModel.refresh() },
                         onSeedDemo = viewModel::seedDemoPortfolio,
+                        onOpenChartChain = {
+                            val defaultTicker = state.snapshot?.groups?.firstOrNull()?.underlyingSymbol ?: "SPY"
+                            onOpenMarketDetail(defaultTicker)
+                        },
                         onNewOrder = viewModel::openNewOrderTicket,
                         onGeminiHandoff = viewModel::handoffPortfolioToGemini
                     )
@@ -307,6 +312,7 @@ private fun SourceToggleHeader(
     onSelectSource: (PortfolioDataSource) -> Unit,
     onRefresh: () -> Unit,
     onSeedDemo: () -> Unit,
+    onOpenChartChain: () -> Unit,
     onNewOrder: () -> Unit,
     onGeminiHandoff: () -> Unit
 ) {
@@ -339,17 +345,30 @@ private fun SourceToggleHeader(
             }
         }
 
+        if (showSeedDemo) {
+            Button(
+                onClick = onSeedDemo,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Seed Demo Paper Portfolio")
+            }
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (showSeedDemo) {
-                Button(
-                    onClick = onSeedDemo,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Seed Demo")
-                }
+            OutlinedButton(
+                onClick = onOpenChartChain,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ShowChart,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Chart & Chain", maxLines = 1)
             }
             OutlinedButton(
                 onClick = onNewOrder,
@@ -361,14 +380,15 @@ private fun SourceToggleHeader(
                     modifier = Modifier.size(16.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("New Order")
+                Text("New Order", maxLines = 1)
             }
-            DeepAnalysisButton(
-                label = "Deep Analysis",
-                onClick = onGeminiHandoff,
-                modifier = Modifier.weight(1.1f)
-            )
         }
+
+        DeepAnalysisButton(
+            label = "Deep Analysis in Gemini",
+            onClick = onGeminiHandoff,
+            modifier = Modifier.fillMaxWidth()
+        )
     }
 }
 

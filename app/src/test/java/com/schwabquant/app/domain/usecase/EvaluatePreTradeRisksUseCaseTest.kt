@@ -320,6 +320,55 @@ class EvaluatePreTradeRisksUseCaseTest {
         org.junit.jupiter.api.Assertions.assertEquals("Financials", com.schwabquant.app.domain.model.TickerSectorMap.sectorFor("brk.b"))
     }
 
+    @Test
+    fun `LOW-2 excludes CASH and INDEX groups from pre-trade sector concentration checks`() {
+        val cashPos = Position(
+            symbol = "SWVXX",
+            underlyingSymbol = "SWVXX",
+            category = AssetCategory.CASH,
+            quantity = BigDecimal("50000"),
+            averageCost = BigDecimal("1.00"),
+            markPrice = BigDecimal("1.00"),
+            marketValue = BigDecimal("50000.00"),
+            unrealizedPnl = BigDecimal.ZERO,
+            unrealizedPnlPercent = 0.0
+        )
+        val indexPos = Position(
+            symbol = "\$SPX.X",
+            underlyingSymbol = "\$SPX.X",
+            category = AssetCategory.INDEX,
+            quantity = BigDecimal("5"),
+            averageCost = BigDecimal("5800.00"),
+            markPrice = BigDecimal("5800.00"),
+            marketValue = BigDecimal("29000.00"),
+            unrealizedPnl = BigDecimal.ZERO,
+            unrealizedPnlPercent = 0.0
+        )
+        val snapshot = sampleSnapshot(
+            netLiq = 100_000.0,
+            settledCash = 20_000.0,
+            groups = listOf(
+                UnderlyingPositionGroup("SWVXX", 1.0, 0.0, BigDecimal("50000.00"), 50.0, BigDecimal.ZERO, BigDecimal.ZERO, 0.0, 0.0, listOf(cashPos)),
+                UnderlyingPositionGroup("\$SPX.X", 5800.0, 0.0, BigDecimal("29000.00"), 29.0, BigDecimal.ZERO, BigDecimal.ZERO, 0.0, 0.0, listOf(indexPos))
+            ),
+            positions = listOf(cashPos, indexPos)
+        )
+        val smallUnmappedBuy = OrderDraft(
+            strategyCategory = OrderStrategyCategory.SINGLE_EQUITY,
+            underlyingSymbol = "ACME",
+            orderType = OrderType.LIMIT,
+            limitPrice = BigDecimal("50.00"),
+            legs = listOf(OrderLeg("ACME", AssetCategory.EQUITY, OrderSide.BUY, 10)),
+            estimatedBpr = 500.0
+        )
+
+        val assessment = useCase.evaluate(smallUnmappedBuy, snapshot, emptyList(), today = today)
+        assertFalse(
+            assessment.warnings.any { it.code == RiskRuleCode.CONCENTRATION_BREACH },
+            "CASH and INDEX positions must not inflate Other-sector concentration warnings"
+        )
+    }
+
     private fun group(sym: String, value: Double) = UnderlyingPositionGroup(
         underlyingSymbol = sym,
         underlyingSpot = 100.0,

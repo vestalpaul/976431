@@ -3,6 +3,7 @@ package com.schwabquant.app.presentation.market.chart
 import android.annotation.SuppressLint
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
@@ -117,14 +118,15 @@ fun LightweightChartWebView(
                 override fun shouldInterceptRequest(
                     view: WebView?,
                     request: WebResourceRequest?
-                ): WebResourceResponse? {
+                ): WebResourceResponse {
                     val uri = request?.url ?: return blockedResponse()
                     if (!uri.scheme.equals("https", ignoreCase = true) ||
-                        !uri.host.equals(APP_ASSETS_HOST, ignoreCase = true)
+                        !uri.host.equals(APP_ASSETS_HOST, ignoreCase = true) ||
+                        uri.path?.startsWith("/assets/") != true
                     ) {
                         return blockedResponse()
                     }
-                    return assetLoader.shouldInterceptRequest(uri)
+                    return assetLoader.shouldInterceptRequest(uri) ?: blockedResponse()
                 }
 
                 override fun shouldOverrideUrlLoading(
@@ -133,7 +135,8 @@ fun LightweightChartWebView(
                 ): Boolean {
                     val uri = request?.url ?: return true
                     val allowed = uri.scheme.equals("https", ignoreCase = true) &&
-                        uri.host.equals(APP_ASSETS_HOST, ignoreCase = true)
+                        uri.host.equals(APP_ASSETS_HOST, ignoreCase = true) &&
+                        uri.path?.startsWith("/assets/") == true
                     return !allowed
                 }
 
@@ -154,14 +157,27 @@ fun LightweightChartWebView(
     }
 
     DisposableEffect(webView) {
+        val layoutListener = View.OnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
+            if (isChartReady && (right - left) > 0 && (bottom - top) > 0) {
+                webView.evaluateJavascript("window.dispatchEvent(new Event('resize'));", null)
+            }
+        }
+        webView.addOnLayoutChangeListener(layoutListener)
         onDispose {
             isChartReady = false
             runCatching {
+                webView.removeOnLayoutChangeListener(layoutListener)
                 webView.removeJavascriptInterface(BRIDGE_NAME)
                 webView.stopLoading()
                 webView.loadUrl("about:blank")
                 webView.destroy()
             }
+        }
+    }
+
+    LaunchedEffect(isChartReady) {
+        if (isChartReady && webView.width > 0 && webView.height > 0) {
+            webView.evaluateJavascript("window.dispatchEvent(new Event('resize'));", null)
         }
     }
 

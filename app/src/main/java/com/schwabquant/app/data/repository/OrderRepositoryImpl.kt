@@ -297,6 +297,7 @@ class OrderRepositoryImpl(
                 executionMode = ExecutionMode.SHADOW
             )
             return safeResult {
+                payloadBuilder.build(shadowTicket)
                 shadowExecutionEngine.simulateOrder(
                     ticket = shadowTicket,
                     immediateMidFill = simulateImmediateMidFill,
@@ -709,7 +710,7 @@ class OrderRepositoryImpl(
                     ?: error("Escalated live re-price aborted: Schwab returned empty securitiesAccount for $displaySym.")
                 val netQty = account.positions
                     .filter { pos ->
-                        !pos.instrument?.assetType.equals(AssetCategory.OPTION.name, ignoreCase = true) &&
+                        PortfolioRepositoryImpl.classifyAssetCategory(pos.instrument?.assetType) == AssetCategory.EQUITY &&
                             SchwabSymbolNormalizer.toDisplaySymbol(pos.instrument?.symbol.orEmpty()) == displaySym
                     }
                     .sumOf { pos -> (pos.longQuantity ?: 0.0) - (pos.shortQuantity ?: 0.0) }
@@ -756,7 +757,10 @@ class OrderRepositoryImpl(
 
             if (safeQty != requestedQty) {
                 replacementTicket.copy(
-                    legs = replacementTicket.legs.map { it.copy(quantity = safeQty) }
+                    legs = replacementTicket.legs.map { it.copy(quantity = safeQty) },
+                    childOrders = replacementTicket.childOrders.map { child ->
+                        child.copy(legs = child.legs.map { it.copy(quantity = safeQty) })
+                    }
                 )
             } else {
                 replacementTicket

@@ -870,6 +870,118 @@ class OrderRepositoryImplTest {
         io.mockk.coVerify(exactly = 0) { traderApi.placeOrder(any(), any()) }
     }
 
+    @Test
+    fun `MEDIUM-1 replaceOrder clamps OCO childOrders quantities to safe remainder`() = runTest {
+        var postedOcoJson = ""
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    request.method == "DELETE" && path == "/accounts/hash-123/orders/9201" ->
+                        MockResponse().setResponseCode(200)
+                    request.method == "GET" && path == "/accounts/hash-123/orders/9201" ->
+                        MockResponse().setResponseCode(200).setBody(
+                            """{"orderId":9201,"status":"REJECTED","quantity":10.0,"filledQuantity":6.0,"remainingQuantity":4.0}"""
+                        )
+                    request.method == "POST" && path == "/accounts/hash-123/orders" -> {
+                        postedOcoJson = request.body.readUtf8()
+                        MockResponse().setResponseCode(201).addHeader("Location", "/accounts/hash-123/orders/9202")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        val h = createHarness(isLive = true)
+        val ocoLeg10 = OrderLeg("GOOG", AssetCategory.EQUITY, OrderSide.SELL, 10)
+        val ocoTicket = OrderTicket(
+            accountHash = "hash-123",
+            executionMode = ExecutionMode.LIVE,
+            orderType = OrderType.LIMIT,
+            session = TradingSession.NORMAL,
+            duration = OrderDuration.GOOD_TILL_CANCEL,
+            strategyType = "OCO",
+            legs = listOf(ocoLeg10),
+            childOrders = listOf(
+                OrderTicket(
+                    accountHash = "hash-123",
+                    executionMode = ExecutionMode.LIVE,
+                    orderType = OrderType.LIMIT,
+                    session = TradingSession.NORMAL,
+                    duration = OrderDuration.GOOD_TILL_CANCEL,
+                    limitPrice = BigDecimal("300.00"),
+                    legs = listOf(ocoLeg10)
+                ),
+                OrderTicket(
+                    accountHash = "hash-123",
+                    executionMode = ExecutionMode.LIVE,
+                    orderType = OrderType.STOP,
+                    session = TradingSession.NORMAL,
+                    duration = OrderDuration.GOOD_TILL_CANCEL,
+                    stopPrice = BigDecimal("260.00"),
+                    legs = listOf(ocoLeg10)
+                )
+            )
+        )
+
+        val outcome = h.repo.replaceOrder(
+            accountHash = "hash-123",
+            oldOrderId = "9201",
+            replacementTicket = ocoTicket,
+            risksAcknowledged = true,
+            cancelToReplaceDelayMs = 0L,
+            allowTerminalOrPartialReprice = true
+        ).getOrThrow()
+
+        assertTrue(outcome is ReplaceOrderOutcome.Replaced)
+        assertTrue(postedOcoJson.contains("\"orderStrategyType\":\"OCO\""))
+        assertEquals(2, Regex("\"quantity\":4\\b").findAll(postedOcoJson).count())
+        assertFalse(postedOcoJson.contains("\"quantity\":10"))
+    }
+
+    @Test
+    fun `MEDIUM-6 Shadow Mode submitOrder validates OCO price ordering identically to Live Mode`() = runTest {
+        val h = createHarness(isLive = false)
+        val leg = OrderLeg("GOOG", AssetCategory.EQUITY, OrderSide.SELL, 5)
+        val invertedOco = OrderTicket(
+            accountHash = "SHADOW_PAPER",
+            executionMode = ExecutionMode.SHADOW,
+            orderType = OrderType.LIMIT,
+            session = TradingSession.NORMAL,
+            duration = OrderDuration.GOOD_TILL_CANCEL,
+            strategyType = "OCO",
+            legs = listOf(leg),
+            childOrders = listOf(
+                OrderTicket(
+                    accountHash = "SHADOW_PAPER",
+                    executionMode = ExecutionMode.SHADOW,
+                    orderType = OrderType.LIMIT,
+                    session = TradingSession.NORMAL,
+                    duration = OrderDuration.GOOD_TILL_CANCEL,
+                    limitPrice = BigDecimal("250.00"),
+                    legs = listOf(leg)
+                ),
+                OrderTicket(
+                    accountHash = "SHADOW_PAPER",
+                    executionMode = ExecutionMode.SHADOW,
+                    orderType = OrderType.STOP,
+                    session = TradingSession.NORMAL,
+                    duration = OrderDuration.GOOD_TILL_CANCEL,
+                    stopPrice = BigDecimal("265.00"),
+                    legs = listOf(leg)
+                )
+            )
+        )
+
+        val rejected = h.repo.submitOrder(
+            ticket = invertedOco,
+            risksAcknowledged = true,
+            simulateImmediateMidFill = false
+        )
+        assertTrue(rejected.isFailure)
+        assertTrue(h.shadowDao.getOrdersSnapshot().isEmpty(), "Inverted OCO must not be persisted in Shadow ledger")
+    }
+
     private fun sampleEquityTicket(mode: ExecutionMode) = OrderTicket(
         accountHash = "hash-123",
         executionMode = mode,

@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -110,11 +111,15 @@ fun ScannerScreen(
                 onToggleDataSource = { useDemo -> viewModel.setUseDemoChains(useDemo) }
             )
 
-            // Watchlist Selector + Manage Watchlists CRUD button
+            // Watchlist Selector + Quick Chart + Manage Watchlists CRUD button
             WatchlistControlRow(
                 watchlists = state.watchlists,
                 selectedWatchlist = state.selectedWatchlist,
                 onSelectWatchlist = viewModel::selectWatchlist,
+                onOpenChart = {
+                    val ticker = state.selectedWatchlist?.tickers?.firstOrNull() ?: "SPY"
+                    onOpenMarketDetail(ticker)
+                },
                 onOpenManager = { showWatchlistManager = true }
             )
 
@@ -383,6 +388,7 @@ private fun WatchlistControlRow(
     watchlists: List<Watchlist>,
     selectedWatchlist: Watchlist?,
     onSelectWatchlist: (Long) -> Unit,
+    onOpenChart: () -> Unit,
     onOpenManager: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -437,6 +443,16 @@ private fun WatchlistControlRow(
                     )
                 }
             }
+        }
+
+        OutlinedButton(onClick = onOpenChart) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ShowChart,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Chart")
         }
 
         OutlinedButton(onClick = onOpenManager) {

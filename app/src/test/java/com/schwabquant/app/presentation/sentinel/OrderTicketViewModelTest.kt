@@ -444,13 +444,223 @@ class OrderTicketViewModelTest {
         collectJob.cancel()
     }
 
+    @Test
+    fun `MEDIUM-1 structural ticket edits clear replacePriorOrderId and isEscalatedReprice while keeping Walk-Up available`() = runTest(mainDispatcher) {
+        val harness = createHarness(isLive = false)
+        val collectJob = backgroundScope.launch { harness.viewModel.uiState.collect {} }
+
+        coEvery {
+            harness.orderRepository.submitOrder(any(), risksAcknowledged = true, any(), any())
+        } returns Result.success(
+            OrderSubmissionResult(
+                orderId = "SHADOW-FRESH-1",
+                executionMode = ExecutionMode.SHADOW,
+                status = "FILLED",
+                message = "Filled",
+                submittedAtEpochMs = 1_000L
+            )
+        )
+
+        fun stagePriorReprice() {
+            harness.stagedOrderHolder.stageDraft(
+                OrderDraft(
+                    strategyCategory = OrderStrategyCategory.SINGLE_EQUITY,
+                    underlyingSymbol = "GOOG",
+                    orderType = OrderType.LIMIT,
+                    session = TradingSession.SEAMLESS,
+                    duration = OrderDuration.DAY,
+                    limitPrice = BigDecimal("268.00"),
+                    legs = listOf(OrderLeg("GOOG", AssetCategory.EQUITY, OrderSide.SELL, 5)),
+                    replacePriorOrderId = "SHADOW-OLD-77",
+                    isEscalatedReprice = true
+                )
+            )
+            advanceUntilIdle()
+        }
+
+        // 1. Editing underlying symbol clears replace metadata and unlocks Walk-Up
+        stagePriorReprice()
+        assertEquals("SHADOW-OLD-77", harness.viewModel.uiState.value.replacePriorOrderId)
+        assertTrue(harness.viewModel.uiState.value.isEscalatedReprice)
+        harness.viewModel.updateUnderlyingSymbol("AAPL")
+        org.junit.jupiter.api.Assertions.assertNull(harness.viewModel.uiState.value.replacePriorOrderId)
+        assertFalse(harness.viewModel.uiState.value.isEscalatedReprice)
+        harness.viewModel.setWalkUpEnabled(true)
+        assertTrue(harness.viewModel.uiState.value.walkUpEnabled)
+
+        // 2. Switching side clears replace metadata
+        stagePriorReprice()
+        harness.viewModel.selectSingleLegSide(OrderSide.BUY)
+        org.junit.jupiter.api.Assertions.assertNull(harness.viewModel.uiState.value.replacePriorOrderId)
+        assertFalse(harness.viewModel.uiState.value.isEscalatedReprice)
+
+        // 3. Switching strategy category + setting OCC symbol clears replace metadata & routes as fresh submitOrder
+        stagePriorReprice()
+        harness.viewModel.selectStrategyCategory(OrderStrategyCategory.SINGLE_OPTION)
+        org.junit.jupiter.api.Assertions.assertNull(harness.viewModel.uiState.value.replacePriorOrderId)
+        assertFalse(harness.viewModel.uiState.value.isEscalatedReprice)
+
+        // 4. Editing OCC option symbol on a staged option reprice clears replace metadata
+        harness.stagedOrderHolder.stageDraft(
+            OrderDraft(
+                strategyCategory = OrderStrategyCategory.SINGLE_OPTION,
+                underlyingSymbol = "GOOG",
+                orderType = OrderType.LIMIT,
+                session = TradingSession.NORMAL,
+                duration = OrderDuration.DAY,
+                limitPrice = BigDecimal("4.20"),
+                legs = listOf(OrderLeg("GOOG  261218C00270000", AssetCategory.OPTION, OrderSide.SELL_TO_CLOSE, 2)),
+                replacePriorOrderId = "SHADOW-OPT-88",
+                isEscalatedReprice = true
+            )
+        )
+        advanceUntilIdle()
+        assertEquals("SHADOW-OPT-88", harness.viewModel.uiState.value.replacePriorOrderId)
+        harness.viewModel.updateSingleOptionOccSymbol("GOOG  270115C00275000")
+        org.junit.jupiter.api.Assertions.assertNull(harness.viewModel.uiState.value.replacePriorOrderId)
+        assertFalse(harness.viewModel.uiState.value.isEscalatedReprice)
+
+        stagePriorReprice()
+        harness.viewModel.selectStrategyCategory(OrderStrategyCategory.SINGLE_EQUITY)
+        harness.viewModel.updateUnderlyingSymbol("SPY")
+        harness.viewModel.updateLimitPrice("580.00")
+        harness.viewModel.reviewAndSubmit()
+        advanceUntilIdle()
+        if (harness.viewModel.uiState.value.pendingRiskAssessment != null) {
+            harness.viewModel.acknowledgeRisksAndContinue()
+        }
+        harness.viewModel.onBiometricSwipeCompleted(null)
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { harness.orderRepository.replaceOrder(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 1) { harness.orderRepository.submitOrder(any(), risksAcknowledged = true, any(), any()) }
+        collectJob.cancel()
+    }
+
+    @Test
+    fun `MEDIUM-2 executionMode flip invalidates review and concurrent double-swipe submits only once`() = runTest {
+        val harness = createHarness(isLive = true)
+        harness.livePortfolioFlow.value = healthyLiveSnapshot()
+        every { harness.biometricGate.canAuthenticate() } returns true
+        val authGate = kotlinx.coroutines.CompletableDeferred<BiometricAuthResult>()
+        coEvery { harness.biometricGate.authenticate(any(), any(), any()) } coAnswers { authGate.await() }
+        coEvery {
+            harness.orderRepository.submitOrder(any(), risksAcknowledged = true, any(), any())
+        } returns Result.success(
+            OrderSubmissionResult(
+                orderId = "LIVE-ONCE-1",
+                executionMode = ExecutionMode.LIVE,
+                status = "SUBMITTED",
+                message = "Submitted",
+                submittedAtEpochMs = 1_000L
+            )
+        )
+
+        val collectJob = backgroundScope.launch { harness.viewModel.uiState.collect {} }
+        val activity = mockk<FragmentActivity>(relaxed = true)
+
+        harness.stagedOrderHolder.stageBlankOrder(symbol = "SPY", spotPrice = 550.0)
+        harness.viewModel.updateLimitPrice("550.00")
+        harness.viewModel.reviewAndSubmit()
+        testScheduler.runCurrent()
+        if (harness.viewModel.uiState.value.pendingRiskAssessment != null) {
+            harness.viewModel.acknowledgeRisksAndContinue()
+        }
+        assertTrue(harness.viewModel.uiState.value.readyForBiometricSwipe)
+
+        // Flip execution mode -> review must be disarmed immediately
+        harness.isLiveFlow.value = false
+        harness.modeFlow.value = ExecutionMode.SHADOW
+        testScheduler.runCurrent()
+        assertFalse(harness.viewModel.uiState.value.readyForBiometricSwipe)
+        harness.viewModel.onBiometricSwipeCompleted(activity)
+        testScheduler.runCurrent()
+        coVerify(exactly = 0) { harness.biometricGate.authenticate(any(), any(), any()) }
+
+        // Flip back to LIVE, re-review cleanly, and fire two back-to-back swipes while BiometricPrompt is in flight
+        harness.isLiveFlow.value = true
+        harness.modeFlow.value = ExecutionMode.LIVE
+        testScheduler.runCurrent()
+        harness.viewModel.reviewAndSubmit()
+        testScheduler.runCurrent()
+        if (harness.viewModel.uiState.value.pendingRiskAssessment != null) {
+            harness.viewModel.acknowledgeRisksAndContinue()
+        }
+        assertTrue(harness.viewModel.uiState.value.readyForBiometricSwipe)
+
+        harness.viewModel.onBiometricSwipeCompleted(activity)
+        harness.viewModel.onBiometricSwipeCompleted(activity)
+        testScheduler.runCurrent()
+
+        coVerify(exactly = 1) { harness.biometricGate.authenticate(any(), any(), any()) }
+        authGate.complete(BiometricAuthResult.Succeeded)
+        testScheduler.runCurrent()
+
+        coVerify(exactly = 1) { harness.orderRepository.submitOrder(any(), risksAcknowledged = true, any(), any()) }
+        collectJob.cancel()
+    }
+
+    @Test
+    fun `MEDIUM-2 mode flip during BiometricPrompt aborts live submission fail-closed`() = runTest {
+        val harness = createHarness(isLive = true)
+        harness.livePortfolioFlow.value = healthyLiveSnapshot()
+        every { harness.biometricGate.canAuthenticate() } returns true
+        val authGate = kotlinx.coroutines.CompletableDeferred<BiometricAuthResult>()
+        coEvery { harness.biometricGate.authenticate(any(), any(), any()) } coAnswers { authGate.await() }
+
+        val collectJob = backgroundScope.launch { harness.viewModel.uiState.collect {} }
+        val activity = mockk<FragmentActivity>(relaxed = true)
+
+        harness.stagedOrderHolder.stageBlankOrder(symbol = "SPY", spotPrice = 550.0)
+        harness.viewModel.updateLimitPrice("550.00")
+        harness.viewModel.reviewAndSubmit()
+        testScheduler.runCurrent()
+        if (harness.viewModel.uiState.value.pendingRiskAssessment != null) {
+            harness.viewModel.acknowledgeRisksAndContinue()
+        }
+
+        harness.viewModel.onBiometricSwipeCompleted(activity)
+        testScheduler.runCurrent()
+
+        // Flip mode while biometric sheet is open
+        harness.isLiveFlow.value = false
+        harness.modeFlow.value = ExecutionMode.SHADOW
+        authGate.complete(BiometricAuthResult.Succeeded)
+        testScheduler.runCurrent()
+
+        assertFalse(harness.viewModel.uiState.value.isSubmitting)
+        assertFalse(harness.viewModel.uiState.value.readyForBiometricSwipe)
+        coVerify(exactly = 0) { harness.orderRepository.submitOrder(any(), any(), any(), any()) }
+        collectJob.cancel()
+    }
+
+    @Test
+    fun `MEDIUM-6 rejects inverted or equal OCO bracket prices pre-review`() = runTest {
+        val harness = createHarness(isLive = false)
+        val collectJob = backgroundScope.launch { harness.viewModel.uiState.collect {} }
+
+        harness.stagedOrderHolder.stageBlankOrder(symbol = "GOOG", spotPrice = 270.0)
+        harness.viewModel.selectStrategyCategory(OrderStrategyCategory.OCO_BRACKET)
+        harness.viewModel.updateOcoTakeProfit("255.00")
+        harness.viewModel.updateOcoStopPrice("260.00")
+        harness.viewModel.reviewAndSubmit()
+        testScheduler.runCurrent()
+
+        assertFalse(harness.viewModel.uiState.value.readyForBiometricSwipe)
+        assertTrue(harness.viewModel.uiState.value.globalMessage?.contains("strictly greater", ignoreCase = true) == true)
+        coVerify(exactly = 0) { harness.orderRepository.submitOrder(any(), any(), any(), any()) }
+        collectJob.cancel()
+    }
+
     private data class Harness(
         val viewModel: OrderTicketViewModel,
         val stagedOrderHolder: StagedOrderHolder,
         val orderRepository: OrderRepository,
         val portfolioRepository: PortfolioRepository,
         val biometricGate: BiometricGate,
-        val livePortfolioFlow: MutableStateFlow<PortfolioSnapshot?>
+        val livePortfolioFlow: MutableStateFlow<PortfolioSnapshot?>,
+        val isLiveFlow: MutableStateFlow<Boolean>,
+        val modeFlow: MutableStateFlow<ExecutionMode>
     )
 
     private fun createHarness(
@@ -501,7 +711,9 @@ class OrderTicketViewModelTest {
             orderRepository = orderRepository,
             portfolioRepository = portfolioRepository,
             biometricGate = biometricGate,
-            livePortfolioFlow = livePortfolioFlow
+            livePortfolioFlow = livePortfolioFlow,
+            isLiveFlow = isLiveFlow,
+            modeFlow = modeFlow
         )
     }
 

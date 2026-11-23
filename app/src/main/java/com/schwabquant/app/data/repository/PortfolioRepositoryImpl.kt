@@ -378,7 +378,9 @@ class PortfolioRepositoryImpl(
         val netQty = (dto.longQuantity ?: 0.0) - (dto.shortQuantity ?: 0.0)
         if (abs(netQty) < 1e-9) return null
 
-        val isOption = instrument.assetType.equals("OPTION", ignoreCase = true)
+        val category = classifyAssetCategory(instrument.assetType)
+        val isOption = category == AssetCategory.OPTION
+        val isCashOrIndex = category == AssetCategory.CASH || category == AssetCategory.INDEX
         val multiplier = if (isOption) OPTION_MULTIPLIER else 1.0
         val parsedOcc = if (isOption) occSymbolFormatter.parse(rawSymbol) else null
 
@@ -431,7 +433,7 @@ class PortfolioRepositoryImpl(
             return Position(
                 symbol = displaySymbol,
                 underlyingSymbol = displayUnderlying,
-                category = AssetCategory.EQUITY,
+                category = category,
                 quantity = BigDecimal.valueOf(netQty),
                 averageCost = BigDecimal.valueOf(avgPrice),
                 markPrice = BigDecimal.valueOf(normalizedPerShareMark),
@@ -439,11 +441,11 @@ class PortfolioRepositoryImpl(
                 unrealizedPnl = BigDecimal.valueOf(openPnl),
                 unrealizedPnlPercent = openPnlPct,
                 dayPnl = BigDecimal.valueOf(dayPnl),
-                delta = 1.0,
+                delta = if (isCashOrIndex) 0.0 else 1.0,
                 gamma = 0.0,
                 theta = 0.0,
                 vega = 0.0,
-                betaToSpy = tickerBeta,
+                betaToSpy = if (isCashOrIndex) 0.0 else tickerBeta,
                 underlyingSpot = normalizedPerShareMark.takeIf { it > 0.0 } ?: underlyingSpot,
                 divDate = divDate,
                 divAmount = divAmount,
@@ -642,6 +644,7 @@ class PortfolioRepositoryImpl(
         val openPnlPct = if (costBasis > 0.0) (openPnl / costBasis) * 100.0 else 0.0
 
         if (!isOption) {
+            val isCashOrIndex = category == AssetCategory.CASH || category == AssetCategory.INDEX
             return Position(
                 symbol = entity.symbol,
                 underlyingSymbol = underlyingSymbol,
@@ -653,11 +656,11 @@ class PortfolioRepositoryImpl(
                 unrealizedPnl = BigDecimal.valueOf(openPnl),
                 unrealizedPnlPercent = openPnlPct,
                 dayPnl = BigDecimal.valueOf((symbolQuote?.quote?.netChange ?: 0.0) * qty),
-                delta = 1.0,
+                delta = if (isCashOrIndex) 0.0 else 1.0,
                 gamma = 0.0,
                 theta = 0.0,
                 vega = 0.0,
-                betaToSpy = tickerBeta,
+                betaToSpy = if (isCashOrIndex) 0.0 else tickerBeta,
                 underlyingSpot = perShareMark,
                 divDate = divDate,
                 divAmount = divAmount,
@@ -787,16 +790,22 @@ class PortfolioRepositoryImpl(
                     0.0
                 }
                 val groupNetDelta = legs.sumOf { leg ->
-                    val mult = if (leg.category == AssetCategory.OPTION) OPTION_MULTIPLIER else 1.0
-                    leg.quantity.toDouble() * (leg.delta ?: 1.0) * mult
+                    if (leg.category == AssetCategory.CASH || leg.category == AssetCategory.INDEX) {
+                        0.0
+                    } else {
+                        val mult = if (leg.category == AssetCategory.OPTION) OPTION_MULTIPLIER else 1.0
+                        leg.quantity.toDouble() * (leg.delta ?: 1.0) * mult
+                    }
                 }
                 val groupNetTheta = legs.sumOf { leg ->
                     val mult = if (leg.category == AssetCategory.OPTION) OPTION_MULTIPLIER else 1.0
                     leg.quantity.toDouble() * (leg.theta ?: 0.0) * mult
                 }
 
+                val isCashOrIndexOnlyGroup = legs.isNotEmpty() &&
+                    legs.all { it.category == AssetCategory.CASH || it.category == AssetCategory.INDEX }
                 val groupAnomalies = mutableListOf<PortfolioAnomaly>()
-                if (weightPct > 25.0) {
+                if (!isCashOrIndexOnlyGroup && weightPct > 25.0) {
                     groupAnomalies += PortfolioAnomaly(
                         type = PortfolioAnomalyType.CONCENTRATION_OVER_25_PCT,
                         symbol = underlying,
@@ -932,6 +941,15 @@ class PortfolioRepositoryImpl(
     )
 
     companion object {
+        internal fun classifyAssetCategory(rawAssetType: String?): AssetCategory =
+            when (rawAssetType?.trim()?.uppercase()) {
+                "OPTION" -> AssetCategory.OPTION
+                "INDEX" -> AssetCategory.INDEX
+                "CASH_EQUIVALENT", "FIXED_INCOME", "MUTUAL_FUND", "CURRENCY" -> AssetCategory.CASH
+                "EQUITY", "COLLECTIVE_INVESTMENT" -> AssetCategory.EQUITY
+                else -> AssetCategory.EQUITY
+            }
+
         private const val OPTION_MULTIPLIER = 100.0
         private val OPTION_MULTIPLIER_BD = BigDecimal(100)
         private const val DEFAULT_SPY_SPOT = 585.0

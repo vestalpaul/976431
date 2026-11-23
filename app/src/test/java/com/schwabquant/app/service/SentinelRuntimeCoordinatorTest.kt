@@ -26,6 +26,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -358,5 +359,110 @@ class SentinelRuntimeCoordinatorTest {
         val emitted = escalatedDeferred.await() as SentinelRuntimeEvent.UnfilledEscalated
         assertEquals(ExecutionMode.LIVE, emitted.executionMode)
         assertEquals("9009", emitted.orderId)
+    }
+
+    @Test
+    fun `MEDIUM-3 activeExecutionCount stays above zero until trackedRuntimeEvents notification ack completes`() = runTest {
+        val rule = SentinelRule(
+            id = 77L,
+            symbol = "SPY",
+            ruleType = SentinelRuleType.LONG_STOP_LOSS,
+            triggerPrice = BigDecimal("580.00"),
+            quantity = 4,
+            holdSeconds = 0,
+            minConsecutiveTicks = 1,
+            executionMode = ExecutionMode.SHADOW
+        )
+        val executionStateMachine = mockk<SentinelExecutionStateMachine> {
+            coEvery {
+                executeTriggeredRule(rule = rule, quote = any(), session = any(), any(), any())
+            } returns SentinelExecutionOutcome.Filled(
+                ruleId = rule.id,
+                orderId = "SHADOW-77",
+                fillPrice = BigDecimal("579.00"),
+                executionMode = ExecutionMode.SHADOW,
+                message = "Filled"
+            )
+        }
+        val coordinator = SentinelRuntimeCoordinator(
+            sentinelRepository = mockk(relaxed = true) {
+                coEvery { getArmedRulesOnce() } returns listOf(rule)
+            },
+            antiStopHuntEvaluator = AntiStopHuntEvaluator(),
+            marketSessionResolver = MarketSessionResolver(),
+            executionStateMachine = executionStateMachine,
+            alertBuilder = OvernightAlertBuilder(),
+            streamerClient = mockk<SchwabStreamerClient>(relaxed = true),
+            preferences = mockk<AppPreferencesDataStore>(relaxed = true) {
+                every { isLiveMode } returns flowOf(false)
+            },
+            stagedOrderHolder = StagedOrderHolder()
+        )
+
+        val receivedAckGate = CompletableDeferred<CompletableDeferred<Unit>?>()
+        val collectorJob = backgroundScope.launch {
+            coordinator.trackedRuntimeEvents.collect { tracked ->
+                if (tracked.event is SentinelRuntimeEvent.OrderFilled) {
+                    receivedAckGate.complete(tracked.ack)
+                } else {
+                    tracked.ack?.complete(Unit)
+                }
+            }
+        }
+        runCurrent()
+
+        coordinator.evaluateIncomingQuote(
+            quote = LiveEquityQuote("SPY", bidPrice = 579.00, askPrice = 579.20, securityStatus = "Normal"),
+            scope = this,
+            sessionOverride = MarketSessionWindow.REGULAR,
+            nowEpochMs = 1_000L
+        )
+        runCurrent()
+
+        val ack = receivedAckGate.await()
+        assertEquals(1, coordinator.activeExecutionCount.value, "Must wait for notification ack before releasing last activeExecutionCount")
+
+        ack?.complete(Unit)
+        runCurrent()
+        assertEquals(0, coordinator.activeExecutionCount.value)
+        collectorJob.cancel()
+    }
+
+    @Test
+    fun `HIGH-1 Shadow Tick Replay Simulator refuses LIVE rules without mutating status or wiping lastSubmittedOrderId`() = runTest {
+        val liveEscalatedRule = SentinelRule(
+            id = 99L,
+            symbol = "GOOG",
+            ruleType = SentinelRuleType.LONG_STOP_LOSS,
+            triggerPrice = BigDecimal("270.00"),
+            quantity = 10,
+            status = SentinelRuleStatus.UNFILLED_ESCALATED,
+            lastSubmittedOrderId = "1002345678",
+            executionMode = ExecutionMode.LIVE
+        )
+        val sentinelRepository = mockk<SentinelRepository>(relaxed = true)
+        val stagedOrderHolder = StagedOrderHolder()
+        val coordinator = SentinelRuntimeCoordinator(
+            sentinelRepository = sentinelRepository,
+            antiStopHuntEvaluator = AntiStopHuntEvaluator(),
+            marketSessionResolver = MarketSessionResolver(),
+            executionStateMachine = mockk(relaxed = true),
+            alertBuilder = OvernightAlertBuilder(),
+            streamerClient = mockk<SchwabStreamerClient>(relaxed = true),
+            preferences = mockk<AppPreferencesDataStore>(relaxed = true) {
+                every { isLiveMode } returns flowOf(false)
+            },
+            stagedOrderHolder = stagedOrderHolder
+        )
+
+        assertTrue(coordinator.simulateStopHuntWick(liveEscalatedRule, this).isFailure)
+        assertTrue(coordinator.simulateSpreadBlowout(liveEscalatedRule, this).isFailure)
+        assertTrue(coordinator.simulateConfirmedPmBreak(liveEscalatedRule, this).isFailure)
+        assertTrue(coordinator.simulateOvernightAlert(liveEscalatedRule, this).isFailure)
+
+        coVerify(exactly = 0) {
+            sentinelRepository.updateRuleStatusWithNote(any(), any(), any(), any())
+        }
+        assertEquals(null, stagedOrderHolder.activeOrderDraft.value)
     }
 }

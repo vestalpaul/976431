@@ -44,7 +44,9 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        handleIncomingIntent(intent)
+        if (savedInstanceState == null) {
+            handleIncomingIntent(intent)
+        }
 
         setContent {
             val selectedTheme by preferencesDataStore.selectedTheme.collectAsStateWithLifecycle(
@@ -79,7 +81,9 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun handleIncomingIntent(intent: Intent?) {
-        if (intent?.action == ACTION_STAGE_SENTINEL_ORDER) {
+        if (intent == null) return
+        val consumedIntent = Intent(Intent.ACTION_MAIN)
+        if (intent.action == ACTION_STAGE_SENTINEL_ORDER) {
             val rawData = RawStageOrderIntentData(
                 internalToken = intent.getStringExtra(EXTRA_INTERNAL_INTENT_TOKEN),
                 executionMode = intent.getStringExtra(EXTRA_STAGE_EXECUTION_MODE),
@@ -91,6 +95,7 @@ class MainActivity : FragmentActivity() {
                 replacePriorOrderId = intent.getStringExtra(EXTRA_STAGE_REPLACE_ORDER_ID),
                 isEscalatedReprice = intent.getBooleanExtra(EXTRA_STAGE_IS_ESCALATED_REPRICE, false)
             )
+            setIntent(consumedIntent)
             lifecycleScope.launch {
                 val activeMode = preferencesDataStore.executionMode.first()
                 when (val parsed = DeepLinkIntentSanitizer.parseAndSanitizeStageOrder(rawData, activeMode)) {
@@ -109,14 +114,15 @@ class MainActivity : FragmentActivity() {
         }
 
         val safeNavTarget = DeepLinkIntentSanitizer.sanitizeNavDestination(
-            intent?.getStringExtra(EXTRA_NAV_DESTINATION)
+            intent.getStringExtra(EXTRA_NAV_DESTINATION)
         )
         if (safeNavTarget != null) {
             pendingNavRoute.value = safeNavTarget
         }
 
-        val dataUri = intent?.data ?: return
-        if (dataUri.scheme == "schwabquant" && dataUri.host == "oauth") {
+        val dataUri = intent.data
+        setIntent(consumedIntent)
+        if (dataUri != null && dataUri.scheme == "schwabquant" && dataUri.host == "oauth") {
             pendingNavRoute.value = NavRoutes.SCHWAB_AUTH_SETUP
             lifecycleScope.launch {
                 val exchanged = authRepository.exchangeAuthorizationCode(dataUri.toString())

@@ -7,8 +7,8 @@ import com.schwabquant.app.core.security.InternalIntentAuth
 
 /**
  * Non-exported notification deep-link trampoline (`android:exported="false"`).
- * Validates notification PendingIntent origination and attaches a per-process 32-byte
- * `InternalIntentAuth.token` before forwarding whitelisted fields to exported `MainActivity`.
+ * Validates notification PendingIntent origination and attaches a single-use 32-byte
+ * `InternalIntentAuth.mintNonce()` before forwarding whitelisted fields to exported `MainActivity`.
  */
 class SentinelDeepLinkActivity : Activity() {
 
@@ -20,7 +20,7 @@ class SentinelDeepLinkActivity : Activity() {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_SINGLE_TOP or
                 Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(MainActivity.EXTRA_INTERNAL_INTENT_TOKEN, InternalIntentAuth.token)
+            putExtra(MainActivity.EXTRA_INTERNAL_INTENT_TOKEN, InternalIntentAuth.mintNonce())
             incoming?.getStringExtra(MainActivity.EXTRA_NAV_DESTINATION)?.let {
                 putExtra(MainActivity.EXTRA_NAV_DESTINATION, it)
             }

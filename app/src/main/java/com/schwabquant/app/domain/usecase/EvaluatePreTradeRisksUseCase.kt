@@ -187,15 +187,19 @@ class EvaluatePreTradeRisksUseCase(
 
         // Rule 5: CONCENTRATION_BREACH (ticker > 25% OR sector > 40%)
         if (addedExposure > 0.0) {
+            val concentrationEligibleGroups = snapshot.groups.filterNot { group ->
+                group.legs.isNotEmpty() &&
+                    group.legs.all { it.category == AssetCategory.CASH || it.category == AssetCategory.INDEX }
+            }
             val cleanUnderlying = SchwabSymbolNormalizer.toDisplaySymbol(draft.underlyingSymbol)
-            val existingTickerVal = snapshot.groups
+            val existingTickerVal = concentrationEligibleGroups
                 .filter { SchwabSymbolNormalizer.toDisplaySymbol(it.underlyingSymbol) == cleanUnderlying }
                 .sumOf { it.totalMarketValue.toDouble().coerceAtLeast(0.0) }
             val postTickerVal = existingTickerVal + addedExposure
             val postTickerPct = (postTickerVal / netLiq) * 100.0
 
             val sector = TickerSectorMap.sectorFor(cleanUnderlying)
-            val existingSectorVal = snapshot.groups
+            val existingSectorVal = concentrationEligibleGroups
                 .filter { TickerSectorMap.sectorFor(SchwabSymbolNormalizer.toDisplaySymbol(it.underlyingSymbol)) == sector }
                 .sumOf { it.totalMarketValue.toDouble().coerceAtLeast(0.0) }
             val postSectorVal = existingSectorVal + addedExposure

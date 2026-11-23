@@ -75,7 +75,7 @@ fun SchwabAuthSetupScreen(
     var appKey by remember { mutableStateOf(initialForm.appKey) }
     var appSecret by remember { mutableStateOf(initialForm.appSecret) }
     var callbackUrl by rememberSaveable { mutableStateOf(initialForm.callbackUrl) }
-    var callbackInput by rememberSaveable { mutableStateOf("") }
+    var callbackInput by remember { mutableStateOf("") }
 
     LaunchedEffect(state.authSession.hasAppCredentials, state.authSession.vaultUnavailableTransient) {
         val refreshed = viewModel.loadStoredCredentialsForm()
@@ -92,6 +92,13 @@ fun SchwabAuthSetupScreen(
     var awaitingOAuthReturn by rememberSaveable { mutableStateOf(false) }
     var showWipeConfirmDialog by rememberSaveable { mutableStateOf(false) }
     var clipboardDetectNotice by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(state.statusMessage, state.errorMessage, state.isBusy) {
+        if (state.statusMessage != null && state.errorMessage == null && !state.isBusy) {
+            callbackInput = ""
+            clipboardDetectNotice = null
+        }
+    }
 
     // Scoped clipboard inspection: ONLY fires on ON_RESUME after user launched Schwab Custom Tab.
     DisposableEffect(lifecycleOwner) {

@@ -313,52 +313,56 @@ class SentinelForegroundService : Service() {
         // M-4 Safeguard: Subscribe eventsJob eagerly (UNDISPATCHED) BEFORE startup orphan recovery emits
         if (eventsJob?.isActive != true) {
             eventsJob = serviceScope.launch(start = CoroutineStart.UNDISPATCHED) {
-                runtimeCoordinator.runtimeEvents.collect { event ->
-                    when (event) {
-                        is SentinelRuntimeEvent.OrderFilled -> postExecutionFillNotification(
-                            title = "Sentinel Exit Filled: ${event.symbol}",
-                            body = event.message,
-                            notificationId = NOTIFICATION_ID_FILL_BASE + (event.ruleId % 100).toInt()
-                        )
-
-                        is SentinelRuntimeEvent.UnfilledEscalated -> postActionableOrderNotification(
-                            channelId = NotificationChannels.DISCONNECT_ALARM,
-                            title = "URGENT: Unfilled Exit (${event.symbol})",
-                            body = event.message,
-                            actionLabel = "Re-Price Exit",
-                            draft = event.repriceDraft,
-                            executionMode = event.executionMode,
-                            notificationId = NOTIFICATION_ID_ESCALATED_BASE + (event.ruleId % 100).toInt()
-                        )
-
-                        is SentinelRuntimeEvent.OvernightAlert -> postActionableOrderNotification(
-                            channelId = NotificationChannels.OVERNIGHT_ALERT,
-                            title = event.payload.title,
-                            body = event.payload.body,
-                            actionLabel = event.payload.actionLabel,
-                            draft = event.payload.stagedOrderDraft,
-                            executionMode = event.payload.executionMode,
-                            notificationId = NOTIFICATION_ID_OVERNIGHT_BASE + (event.payload.ruleId % 100).toInt()
-                        )
-
-                        is SentinelRuntimeEvent.DipBuyAlert -> postActionableOrderNotification(
-                            channelId = NotificationChannels.OVERNIGHT_ALERT,
-                            title = event.payload.title,
-                            body = event.payload.body,
-                            actionLabel = event.payload.actionLabel,
-                            draft = event.payload.stagedOrderDraft,
-                            executionMode = event.payload.executionMode,
-                            notificationId = NOTIFICATION_ID_DIP_BASE + (event.payload.ruleId % 100).toInt()
-                        )
-
-                        is SentinelRuntimeEvent.OrphanedRulesRecovered -> {
-                            val syms = event.rules.joinToString(", ") { it.symbol }
-                            postDisconnectAlarm(
-                                "Sentinel restarted mid-exit on $syms — escalated to UNFILLED_ESCALATED. Verify positions/orders."
+                runtimeCoordinator.trackedRuntimeEvents.collect { tracked ->
+                    try {
+                        when (val event = tracked.event) {
+                            is SentinelRuntimeEvent.OrderFilled -> postExecutionFillNotification(
+                                title = "Sentinel Exit Filled: ${event.symbol}",
+                                body = event.message,
+                                notificationId = NOTIFICATION_ID_FILL_BASE + (event.ruleId % 100).toInt()
                             )
-                        }
 
-                        is SentinelRuntimeEvent.InfoMessage -> Unit
+                            is SentinelRuntimeEvent.UnfilledEscalated -> postActionableOrderNotification(
+                                channelId = NotificationChannels.DISCONNECT_ALARM,
+                                title = "URGENT: Unfilled Exit (${event.symbol})",
+                                body = event.message,
+                                actionLabel = "Re-Price Exit",
+                                draft = event.repriceDraft,
+                                executionMode = event.executionMode,
+                                notificationId = NOTIFICATION_ID_ESCALATED_BASE + (event.ruleId % 100).toInt()
+                            )
+
+                            is SentinelRuntimeEvent.OvernightAlert -> postActionableOrderNotification(
+                                channelId = NotificationChannels.OVERNIGHT_ALERT,
+                                title = event.payload.title,
+                                body = event.payload.body,
+                                actionLabel = event.payload.actionLabel,
+                                draft = event.payload.stagedOrderDraft,
+                                executionMode = event.payload.executionMode,
+                                notificationId = NOTIFICATION_ID_OVERNIGHT_BASE + (event.payload.ruleId % 100).toInt()
+                            )
+
+                            is SentinelRuntimeEvent.DipBuyAlert -> postActionableOrderNotification(
+                                channelId = NotificationChannels.OVERNIGHT_ALERT,
+                                title = event.payload.title,
+                                body = event.payload.body,
+                                actionLabel = event.payload.actionLabel,
+                                draft = event.payload.stagedOrderDraft,
+                                executionMode = event.payload.executionMode,
+                                notificationId = NOTIFICATION_ID_DIP_BASE + (event.payload.ruleId % 100).toInt()
+                            )
+
+                            is SentinelRuntimeEvent.OrphanedRulesRecovered -> {
+                                val syms = event.rules.joinToString(", ") { it.symbol }
+                                postDisconnectAlarm(
+                                    "Sentinel restarted mid-exit on $syms — escalated to UNFILLED_ESCALATED. Verify positions/orders."
+                                )
+                            }
+
+                            is SentinelRuntimeEvent.InfoMessage -> Unit
+                        }
+                    } finally {
+                        tracked.ack?.complete(Unit)
                     }
                 }
             }

@@ -19,23 +19,51 @@ import java.security.SecureRandom
 import java.util.Base64
 
 /**
- * Per-process cryptographic nonce verifying internal notification deep-link forwards from
- * non-exported `SentinelDeepLinkActivity` to exported `MainActivity`.
+ * Per-process single-use cryptographic nonces verifying internal notification deep-link forwards
+ * from non-exported `SentinelDeepLinkActivity` to exported `MainActivity`.
  */
 object InternalIntentAuth {
-    val token: String by lazy {
+    private const val MAX_ACTIVE_NONCES = 64
+    private val secureRandom = SecureRandom()
+    private val lock = Any()
+    private val activeNonces = ArrayDeque<String>(MAX_ACTIVE_NONCES)
+
+    val token: String
+        get() = mintNonce()
+
+    fun mintNonce(): String {
         val bytes = ByteArray(32)
-        SecureRandom().nextBytes(bytes)
-        Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        secureRandom.nextBytes(bytes)
+        val nonce = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        synchronized(lock) {
+            while (activeNonces.size >= MAX_ACTIVE_NONCES) {
+                activeNonces.removeFirst()
+            }
+            activeNonces.addLast(nonce)
+        }
+        return nonce
     }
 
-    fun isValid(candidate: String?): Boolean {
+    fun consumeNonce(candidate: String?): Boolean {
         if (candidate.isNullOrBlank()) return false
-        return MessageDigest.isEqual(
-            candidate.toByteArray(Charsets.UTF_8),
-            token.toByteArray(Charsets.UTF_8)
-        )
+        val candidateBytes = candidate.toByteArray(Charsets.UTF_8)
+        synchronized(lock) {
+            var matchedIndex = -1
+            for (i in activeNonces.indices) {
+                val storedBytes = activeNonces[i].toByteArray(Charsets.UTF_8)
+                if (MessageDigest.isEqual(candidateBytes, storedBytes) && matchedIndex == -1) {
+                    matchedIndex = i
+                }
+            }
+            if (matchedIndex >= 0) {
+                activeNonces.removeAt(matchedIndex)
+                return true
+            }
+            return false
+        }
     }
+
+    fun isValid(candidate: String?): Boolean = consumeNonce(candidate)
 }
 
 data class RawStageOrderIntentData(
@@ -94,7 +122,7 @@ object DeepLinkIntentSanitizer {
         raw: RawStageOrderIntentData,
         activeMode: ExecutionMode
     ): DeepLinkStageResult {
-        if (!InternalIntentAuth.isValid(raw.internalToken)) {
+        if (!InternalIntentAuth.consumeNonce(raw.internalToken)) {
             return DeepLinkStageResult.Rejected("Unauthenticated internal staging intent rejected.")
         }
 

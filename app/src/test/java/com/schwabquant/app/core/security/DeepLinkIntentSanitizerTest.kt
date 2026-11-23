@@ -238,4 +238,31 @@ class DeepLinkIntentSanitizerTest {
         assertNull(shadowDraft.limitPrice)
         assertNull(shadowDraft.estimatedBpr)
     }
+
+    @Test
+    fun `MEDIUM-5 minted internal intent nonces are strictly single-use and marketDetail route is blocked from external deep links`() {
+        val singleUseNonce = InternalIntentAuth.mintNonce()
+        val raw = RawStageOrderIntentData(
+            internalToken = singleUseNonce,
+            executionMode = ExecutionMode.SHADOW.name,
+            symbol = "SPY",
+            side = OrderSide.BUY.name,
+            quantity = 3,
+            limitPrice = "580.00",
+            sourceLabel = "Notification",
+            replacePriorOrderId = null,
+            isEscalatedReprice = false
+        )
+
+        val firstUse = DeepLinkIntentSanitizer.parseAndSanitizeStageOrder(raw, ExecutionMode.SHADOW)
+        assertTrue(firstUse is DeepLinkStageResult.ValidDraft)
+
+        // Exact replay using the same nonce must fail closed!
+        val replayUse = DeepLinkIntentSanitizer.parseAndSanitizeStageOrder(raw, ExecutionMode.SHADOW)
+        assertTrue(replayUse is DeepLinkStageResult.Rejected)
+
+        // Unauthenticated external deep-links must never resolve marketDetail routes
+        assertNull(DeepLinkIntentSanitizer.sanitizeNavDestination(NavRoutes.MARKET_DETAIL_ROUTE))
+        assertNull(DeepLinkIntentSanitizer.sanitizeNavDestination(NavRoutes.marketDetail("SPY")))
+    }
 }
