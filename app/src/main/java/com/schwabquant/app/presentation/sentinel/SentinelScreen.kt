@@ -605,14 +605,15 @@ private fun ShadowTickReplaySimulatorCard(
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = "Shadow Mode Tick Replay Simulator",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
-                    color = colors.shadowBannerFg
+                    color = colors.shadowBannerFg,
+                    modifier = Modifier.weight(1f)
                 )
                 StatusPill(text = "PAPER ONLY", color = colors.warning)
             }
@@ -1005,6 +1006,8 @@ private fun StatusPill(
             text = text,
             style = SchwabQuantTheme.numericTypography.badgeMono,
             color = color,
+            maxLines = 1,
+            softWrap = false,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
         )
     }

@@ -10,6 +10,8 @@ import com.schwabquant.app.domain.model.OrderDraft
 import com.schwabquant.app.domain.model.OrderSide
 import com.schwabquant.app.domain.model.OrderStrategyCategory
 import com.schwabquant.app.domain.model.OrderType
+import com.schwabquant.app.domain.model.PmccOptionLeg
+import com.schwabquant.app.domain.model.PmccSeverity
 import com.schwabquant.app.domain.model.PortfolioSnapshot
 import com.schwabquant.app.domain.model.PreTradeRiskAssessment
 import com.schwabquant.app.domain.model.RiskRuleCode
@@ -19,13 +21,14 @@ import com.schwabquant.app.domain.model.TickerSectorMap
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
 
 /**
- * Pure-JVM, deterministic 8-Rule Soft-Gate Pre-Trade Risk Engine.
+ * Pure-JVM, deterministic Soft-Gate Pre-Trade Risk Engine.
  * Zero hard blocks (`isBlocked = false`) — every triggered rule is surfaced cleanly inside
  * RiskWarningDialog for explicit user override and audit logging.
  */
@@ -34,6 +37,7 @@ class EvaluatePreTradeRisksUseCase(
     private val washSaleDao: WashSaleDao? = null,
     private val evaluateExDivRadarUseCase: EvaluateExDivRadarUseCase = EvaluateExDivRadarUseCase(),
     private val occSymbolFormatter: OccSymbolFormatter = OccSymbolFormatter(),
+    private val validatePmccStructureUseCase: ValidatePmccStructureUseCase = ValidatePmccStructureUseCase(),
     private val zoneId: ZoneId = NY_ZONE
 ) {
 
@@ -41,11 +45,13 @@ class EvaluatePreTradeRisksUseCase(
     constructor(
         washSaleDao: WashSaleDao,
         evaluateExDivRadarUseCase: EvaluateExDivRadarUseCase,
-        occSymbolFormatter: OccSymbolFormatter
+        occSymbolFormatter: OccSymbolFormatter,
+        validatePmccStructureUseCase: ValidatePmccStructureUseCase
     ) : this(
         washSaleDao = washSaleDao,
         evaluateExDivRadarUseCase = evaluateExDivRadarUseCase,
         occSymbolFormatter = occSymbolFormatter,
+        validatePmccStructureUseCase = validatePmccStructureUseCase,
         zoneId = NY_ZONE
     )
 
@@ -87,6 +93,7 @@ class EvaluatePreTradeRisksUseCase(
         }
 
         checkDiagonalStructureRules(draft, warnings)
+        checkHeldLeapsRollGatekeeper(draft, snapshot, today, warnings)
         val cashOutlay = estimateCashOutlayDollars(draft)
         val addedExposure = estimateAddedRiskExposureDollars(draft, cashOutlay)
         checkCapitalConcentrationAndCashRules(draft, snapshot, cashOutlay, addedExposure, warnings)
@@ -157,6 +164,102 @@ class EvaluatePreTradeRisksUseCase(
                 metricDetail = "Debit $${fmt2(netDebit)} (${fmt1((netDebit / strikeWidth) * 100.0)}% > 85% target)"
             )
         }
+    }
+
+    private fun checkHeldLeapsRollGatekeeper(
+        draft: OrderDraft,
+        snapshot: PortfolioSnapshot?,
+        today: LocalDate,
+        warnings: MutableList<RiskWarning>
+    ) {
+        if (snapshot == null || snapshot.positions.isEmpty()) return
+        val newShortOrderLeg = draft.legs.firstOrNull { leg ->
+            leg.category == AssetCategory.OPTION &&
+                (leg.side == OrderSide.SELL_TO_OPEN || leg.side == OrderSide.SELL) &&
+                (leg.isCall ?: occSymbolFormatter.parse(leg.symbol)?.isCall ?: true)
+        } ?: return
+
+        val cleanUnderlying = SchwabSymbolNormalizer.toDisplaySymbol(
+            newShortOrderLeg.underlyingSymbol ?: draft.underlyingSymbol
+        )
+        val snapshotReport = validatePmccStructureUseCase.validatePortfolio(snapshot.positions)
+        val matchingPairs = snapshotReport.pairs.filter { it.underlying == cleanUnderlying }
+        val matchingUnhedgedLeaps = snapshotReport.unhedgedLeaps.filter { it.underlying == cleanUnderlying }
+        if (matchingPairs.isEmpty() && matchingUnhedgedLeaps.isEmpty()) return
+
+        val shortOcc = occSymbolFormatter.parse(newShortOrderLeg.symbol)
+        val shortStrike = newShortOrderLeg.strike ?: shortOcc?.strike?.toDouble() ?: return
+        val shortDte = newShortOrderLeg.dte
+            ?: shortOcc?.expiration?.let { ChronoUnit.DAYS.between(today, it).toInt().coerceAtLeast(0) }
+            ?: 30
+        val shortUnitPx = newShortOrderLeg.estimatedUnitPrice?.toDouble()
+            ?: draft.estimatedMid
+            ?: draft.limitPrice?.toDouble()
+            ?: 0.0
+        val candidateShort = PmccOptionLeg(
+            symbol = newShortOrderLeg.symbol,
+            underlying = cleanUnderlying,
+            strike = shortStrike,
+            dte = shortDte,
+            quantity = -newShortOrderLeg.quantity.coerceAtLeast(1).toDouble(),
+            avgCost = shortUnitPx,
+            mark = shortUnitPx,
+            delta = newShortOrderLeg.delta ?: 0.30,
+            isCall = true,
+            expirationIsoDate = newShortOrderLeg.expirationIsoDate ?: shortOcc?.expiration?.toString()
+        )
+
+        val btcOrderLeg = draft.legs.firstOrNull { leg ->
+            leg.category == AssetCategory.OPTION && leg.side == OrderSide.BUY_TO_CLOSE
+        }
+
+        val validationReport = if (btcOrderLeg != null && matchingPairs.isNotEmpty()) {
+            val targetPair = matchingPairs.firstOrNull {
+                it.shortLeg.symbol.equals(btcOrderLeg.symbol, ignoreCase = true)
+            } ?: matchingPairs.first()
+            val netRollCredit = when (draft.orderType) {
+                OrderType.NET_CREDIT -> draft.limitPrice?.toDouble() ?: draft.estimatedMid ?: 0.0
+                OrderType.NET_DEBIT -> -(draft.limitPrice?.toDouble() ?: draft.estimatedMid ?: 0.0)
+                else -> shortUnitPx - (btcOrderLeg.estimatedUnitPrice?.toDouble() ?: 0.0)
+            }
+            validatePmccStructureUseCase.validateCandidateRoll(
+                existingPair = targetPair,
+                newShortLeg = candidateShort,
+                netRollCredit = netRollCredit
+            )
+        } else if (matchingUnhedgedLeaps.isNotEmpty()) {
+            val targetLeaps = matchingUnhedgedLeaps.first()
+            validatePmccStructureUseCase.validatePmccBook(
+                optionLegs = listOf(targetLeaps, candidateShort)
+            )
+        } else {
+            val existingLegs = matchingPairs.flatMap { listOf(it.longLeg, it.shortLeg) }
+            validatePmccStructureUseCase.validatePmccBook(
+                optionLegs = existingLegs + candidateShort
+            )
+        }
+
+        val blockingFindings = validationReport.findings.filter {
+            it.supersededBy == null && it.severity != PmccSeverity.INFO
+        }
+        if (blockingFindings.isEmpty()) return
+
+        val worstSeverity = if (blockingFindings.any { it.severity == PmccSeverity.CRITICAL }) {
+            RiskSeverity.CRITICAL
+        } else {
+            RiskSeverity.WARNING
+        }
+        val pair = validationReport.pairs.firstOrNull()
+        val basisDetail = pair?.let {
+            "Basis $${fmt2(it.netDebitBasis)} vs Width $${fmt2(it.strikeWidth)} (Buf ${if (it.widthBufferBasis >= 0) "+" else "-"}$${fmt2(abs(it.widthBufferBasis))})"
+        } ?: "${blockingFindings.size} PMCC finding(s)"
+
+        warnings += RiskWarning(
+            code = RiskRuleCode.PMCC_ROLL_STRUCTURE_RISK,
+            severity = worstSeverity,
+            plainEnglishImpact = blockingFindings.joinToString(" | ") { "${it.code}: ${it.message}" },
+            metricDetail = basisDetail
+        )
     }
 
     private fun checkCapitalConcentrationAndCashRules(

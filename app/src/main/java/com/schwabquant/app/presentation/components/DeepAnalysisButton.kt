@@ -1,5 +1,6 @@
 package com.schwabquant.app.presentation.components
 
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -19,18 +20,24 @@ import androidx.compose.ui.unit.dp
 fun DeepAnalysisButton(
     label: String = "Deep Analysis in Gemini",
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
 ) {
     FilledTonalButton(
         onClick = onClick,
+        contentPadding = contentPadding,
         modifier = modifier
     ) {
         Icon(
             imageVector = Icons.Filled.AutoAwesome,
             contentDescription = null,
-            modifier = Modifier.size(18.dp)
+            modifier = Modifier.size(16.dp)
         )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(text = label)
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = label,
+            maxLines = 1,
+            softWrap = false
+        )
     }
 }

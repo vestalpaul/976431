@@ -6,6 +6,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -63,10 +65,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.schwabquant.app.core.quant.BetaSource
+import com.schwabquant.app.core.quant.StressIvMode
+import com.schwabquant.app.core.quant.StressMatrixSummary
 import com.schwabquant.app.core.quant.StressScenarioResult
 import com.schwabquant.app.domain.model.AccountSummary
 import com.schwabquant.app.domain.model.AggregatedGreeks
 import com.schwabquant.app.domain.model.AssetCategory
+import com.schwabquant.app.domain.model.PmccPair
+import com.schwabquant.app.domain.model.PmccSeverity
+import com.schwabquant.app.domain.model.PmccValidationReport
+import com.schwabquant.app.domain.model.PortfolioAnomalyType
 import com.schwabquant.app.domain.model.PortfolioDataSource
 import com.schwabquant.app.domain.model.Position
 import com.schwabquant.app.domain.model.UnderlyingPositionGroup
@@ -93,6 +102,7 @@ fun DashboardScreen(
 
     var washRadarExpanded by rememberSaveable { mutableStateOf(true) }
     var exDivRadarExpanded by rememberSaveable { mutableStateOf(true) }
+    var pmccHealthExpanded by rememberSaveable { mutableStateOf(true) }
     var ordersExpanded by rememberSaveable { mutableStateOf(false) }
     var showLogTradeDialog by rememberSaveable { mutableStateOf(false) }
 
@@ -176,7 +186,10 @@ fun DashboardScreen(
                     item {
                         AggregatedGreeksRibbon(
                             greeks = snapshot.aggregatedGreeks,
-                            spySpot = snapshot.spySpot
+                            spySpot = snapshot.spySpot,
+                            hasBetaFallback = snapshot.portfolioAnomalies.any {
+                                it.type == PortfolioAnomalyType.BETA_FALLBACK
+                            }
                         )
                     }
 
@@ -185,8 +198,25 @@ fun DashboardScreen(
                         item {
                             StressMatrixCard(
                                 scenarios = state.stressMatrix,
+                                stressSummary = state.stressSummary,
+                                ivMode = state.stressIvMode,
                                 includeVolSkewShock = state.includeVolSkewShock,
+                                onSelectIvMode = viewModel::selectStressIvMode,
                                 onToggleVolSkew = viewModel::toggleVolSkewShock
+                            )
+                        }
+                    }
+
+                    // 4A. 5-Gate PMCC Structure Health Card
+                    val pmccReport = state.pmccReport
+                    if (pmccReport != null &&
+                        (pmccReport.pairs.isNotEmpty() || pmccReport.uncoveredShortCalls.isNotEmpty())
+                    ) {
+                        item {
+                            PmccStructureHealthCard(
+                                report = pmccReport,
+                                expanded = pmccHealthExpanded,
+                                onToggleExpand = { pmccHealthExpanded = !pmccHealthExpanded }
                             )
                         }
                     }
@@ -345,50 +375,46 @@ private fun SourceToggleHeader(
             }
         }
 
-        if (showSeedDemo) {
-            Button(
-                onClick = onSeedDemo,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Seed Demo Paper Portfolio")
-            }
-        }
-
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
+            if (showSeedDemo) {
+                Button(
+                    onClick = onSeedDemo,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Seed Demo", maxLines = 1, softWrap = false)
+                }
+            }
             OutlinedButton(
                 onClick = onOpenChartChain,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                 modifier = Modifier.weight(1f)
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ShowChart,
                     contentDescription = null,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(15.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Chart & Chain", maxLines = 1)
+                Text("Chart", maxLines = 1, softWrap = false)
             }
             OutlinedButton(
                 onClick = onNewOrder,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Add,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("New Order", maxLines = 1)
+                Text("+ Order", maxLines = 1, softWrap = false)
             }
+            DeepAnalysisButton(
+                label = "Deep AI",
+                onClick = onGeminiHandoff,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                modifier = Modifier.weight(1f)
+            )
         }
-
-        DeepAnalysisButton(
-            label = "Deep Analysis in Gemini",
-            onClick = onGeminiHandoff,
-            modifier = Modifier.fillMaxWidth()
-        )
     }
 }
 
@@ -544,10 +570,12 @@ private fun AccountTelemetryCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AggregatedGreeksRibbon(
     greeks: AggregatedGreeks,
-    spySpot: Double
+    spySpot: Double,
+    hasBetaFallback: Boolean
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = SchwabQuantTheme.colors.surfaceElevated),
@@ -559,17 +587,31 @@ private fun AggregatedGreeksRibbon(
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Portfolio Greeks",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "Portfolio Greeks",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (hasBetaFallback) {
+                        StatusChip(
+                            text = "BETA FALLBACK",
+                            color = SchwabQuantTheme.colors.warning
+                        )
+                    }
+                }
                 Text(
                     text = "SPY Ref $${fmt2(spySpot)}",
                     style = SchwabQuantTheme.numericTypography.badgeMono,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
 
@@ -590,10 +632,14 @@ private fun AggregatedGreeksRibbon(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun StressMatrixCard(
     scenarios: List<StressScenarioResult>,
+    stressSummary: StressMatrixSummary?,
+    ivMode: StressIvMode,
     includeVolSkewShock: Boolean,
+    onSelectIvMode: (StressIvMode) -> Unit,
     onToggleVolSkew: (Boolean) -> Unit
 ) {
     val maxAbsPnl = scenarios.maxOfOrNull { abs(it.portfolioDollarPnl) }?.coerceAtLeast(1.0) ?: 1.0
@@ -614,21 +660,87 @@ private fun StressMatrixCard(
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        text = if (includeVolSkewShock) "With realistic Vol Skew IV shock" else "Constant IV (spot shock only)",
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = if (includeVolSkewShock) {
+                            "Calibrated BSM • ${ivMode.label}"
+                        } else {
+                            "Calibrated BSM • Constant IV"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "Vol Skew",
-                        style = MaterialTheme.typography.labelSmall
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        softWrap = false
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Switch(
                         checked = includeVolSkewShock,
                         onCheckedChange = onToggleVolSkew
                     )
+                }
+            }
+
+            if (includeVolSkewShock) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    StressIvMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = ivMode == mode,
+                            onClick = { onSelectIvMode(mode) },
+                            label = { Text(mode.label, maxLines = 1, softWrap = false) }
+                        )
+                    }
+                }
+            }
+
+            if (stressSummary != null &&
+                (stressSummary.payoffSkew15 != null ||
+                    stressSummary.upsideCapture5 != null ||
+                    stressSummary.isNegativeSkew ||
+                    stressSummary.isUpsideCapped)
+            ) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    stressSummary.payoffSkew15?.let { skew ->
+                        StatusChip(
+                            text = "Skew ±15%: ${fmt2(skew)}x",
+                            color = if (stressSummary.isNegativeSkew) {
+                                SchwabQuantTheme.colors.loss
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            }
+                        )
+                    }
+                    stressSummary.upsideCapture5?.let { cap ->
+                        StatusChip(
+                            text = "Up +5%: ${fmt0(cap * 100.0)}%",
+                            color = if (stressSummary.isUpsideCapped) {
+                                SchwabQuantTheme.colors.warning
+                            } else {
+                                SchwabQuantTheme.colors.profit
+                            }
+                        )
+                    }
+                    if (stressSummary.isNegativeSkew) {
+                        StatusChip(
+                            text = "NEGATIVE SKEW",
+                            color = SchwabQuantTheme.colors.loss
+                        )
+                    }
+                    if (stressSummary.isUpsideCapped) {
+                        StatusChip(
+                            text = "UPSIDE CAPPED",
+                            color = SchwabQuantTheme.colors.warning
+                        )
+                    }
                 }
             }
 
@@ -674,6 +786,117 @@ private fun StressMatrixCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PmccStructureHealthCard(
+    report: PmccValidationReport,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit
+) {
+    val activeFindings = report.findings.filter { it.severity != PmccSeverity.INFO }
+    val statusColor = when {
+        activeFindings.any { it.severity == PmccSeverity.CRITICAL } -> SchwabQuantTheme.colors.loss
+        activeFindings.any { it.severity == PmccSeverity.ERROR || it.severity == PmccSeverity.WARNING } ->
+            SchwabQuantTheme.colors.warning
+        else -> SchwabQuantTheme.colors.profit
+    }
+    val statusText = when {
+        report.passed -> "HEALTHY"
+        activeFindings.any { it.severity == PmccSeverity.CRITICAL } -> "CRITICAL"
+        else -> "${activeFindings.size} ISSUE(S)"
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SchwabQuantTheme.colors.surfaceElevated),
+        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.45f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggleExpand),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "PMCC Structure Health (${report.pairs.size} Pairs)",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    StatusChip(text = statusText, color = statusColor)
+                    Icon(
+                        imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = null
+                    )
+                }
+            }
+
+            if (expanded) {
+                report.pairs.forEach { pair ->
+                    PmccPairSummaryRow(pair)
+                }
+                activeFindings.forEach { finding ->
+                    val fColor = when (finding.severity) {
+                        PmccSeverity.CRITICAL -> SchwabQuantTheme.colors.loss
+                        PmccSeverity.ERROR, PmccSeverity.WARNING -> SchwabQuantTheme.colors.warning
+                        PmccSeverity.INFO -> MaterialTheme.colorScheme.primary
+                    }
+                    val supTag = finding.supersededBy?.let { " [superseded by $it]" } ?: ""
+                    Text(
+                        text = "• [${finding.code}]$supTag ${finding.message}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = fColor
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PmccPairSummaryRow(pair: PmccPair) {
+    val bufColor = if (pair.widthBufferBasis >= 0.0) {
+        SchwabQuantTheme.colors.profit
+    } else {
+        SchwabQuantTheme.colors.loss
+    }
+    val bufSign = if (pair.widthBufferBasis >= 0.0) "+" else "-"
+    val markSign = if (pair.widthBufferMark >= 0.0) "+" else "-"
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "${pair.contracts}x ${pair.underlying} +C${fmt0(pair.longLeg.strike)}/-C${fmt0(pair.shortLeg.strike)}",
+                style = SchwabQuantTheme.numericTypography.greekValue
+            )
+            Text(
+                text = "Buf ${bufSign}$${fmt2(abs(pair.widthBufferBasis))}",
+                style = SchwabQuantTheme.numericTypography.badgeMono,
+                color = bufColor,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
+        Text(
+            text = "W $${fmt2(pair.strikeWidth)} • Basis $${fmt2(pair.netDebitBasis)} • MarkBuf ${markSign}$${fmt2(abs(pair.widthBufferMark))} • NetΔ ${fmt2(pair.netDelta)}",
+            style = SchwabQuantTheme.numericTypography.tableCell,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun GroupedPositionCard(
     group: UnderlyingPositionGroup,
@@ -720,7 +943,7 @@ private fun GroupedPositionCard(
                         )
                     }
                     Text(
-                        text = "Δ ${fmt2(group.groupNetDelta)} • Θ $${fmt2(group.groupNetTheta)}/d • MV $${fmtMoney(group.totalMarketValue)}",
+                        text = "β=${fmt2(group.betaToSpy)} [${group.betaSource.badge}] • Δ ${fmt2(group.groupNetDelta)} • Θ $${fmt2(group.groupNetTheta)}/d • MV $${fmtMoney(group.totalMarketValue)}",
                         style = SchwabQuantTheme.numericTypography.tableCell,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -740,14 +963,19 @@ private fun GroupedPositionCard(
             }
 
             if (group.anomalies.isNotEmpty() || groupExDivAlerts.isNotEmpty()) {
-                Row(
+                FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     group.anomalies.forEach { anomaly ->
                         StatusChip(
                             text = anomaly.message,
-                            color = SchwabQuantTheme.colors.warning
+                            color = if (anomaly.type == PortfolioAnomalyType.BETA_FALLBACK) {
+                                SchwabQuantTheme.colors.warning
+                            } else {
+                                SchwabQuantTheme.colors.warning
+                            }
                         )
                     }
                     if (groupExDivAlerts.isNotEmpty()) {
@@ -1220,6 +1448,8 @@ private fun StatusChip(text: String, color: Color) {
             text = text,
             style = SchwabQuantTheme.numericTypography.badgeMono,
             color = color,
+            maxLines = 1,
+            softWrap = false,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
         )
     }

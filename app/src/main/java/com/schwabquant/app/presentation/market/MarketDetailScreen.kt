@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -47,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -215,75 +217,119 @@ private fun MarketDetailHeader(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 4.dp)
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onBack) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.size(36.dp)
+                ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back"
+                        contentDescription = "Back",
+                        modifier = Modifier.size(20.dp)
                     )
                 }
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                Text(
+                    text = state.symbol,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 4.dp)
+                )
+                IconButton(
+                    onClick = onSearchTicker,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Search,
+                        contentDescription = "Switch Ticker",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "Refresh",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onTradeStock,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.AddShoppingCart,
+                        contentDescription = "Trade Stock",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onAddSentinelStop,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Shield,
+                        contentDescription = "Add Sentinel Stop",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (state.spotPrice > 0.0) {
+                    Text(
+                        text = "$${fmt2(state.spotPrice)}",
+                        style = SchwabQuantTheme.numericTypography.priceMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+                if (chgDollar != null && chgPct != null) {
+                    val sign = if (chgDollar >= 0.0) "+" else "-"
+                    Text(
+                        text = "${sign}$${fmt2(kotlin.math.abs(chgDollar))} (${sign}${fmt2(kotlin.math.abs(chgPct))}%)",
+                        style = SchwabQuantTheme.numericTypography.badgeMono,
+                        color = chgColor,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                }
+                state.volRank52w?.let { vr ->
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = colors.surfaceElevated,
+                        border = BorderStroke(1.dp, colors.borderSubtle)
                     ) {
                         Text(
-                            text = state.symbol,
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
+                            text = "VR ${fmt0(vr)}%",
+                            style = SchwabQuantTheme.numericTypography.badgeMono,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         )
-                        if (state.spotPrice > 0.0) {
-                            Text(
-                                text = "$${fmt2(state.spotPrice)}",
-                                style = SchwabQuantTheme.numericTypography.priceMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
                     }
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (chgDollar != null && chgPct != null) {
-                            val sign = if (chgDollar >= 0.0) "+" else "-"
-                            Text(
-                                text = "${sign}$${fmt2(kotlin.math.abs(chgDollar))} (${sign}${fmt2(kotlin.math.abs(chgPct))}%)",
-                                style = SchwabQuantTheme.numericTypography.badgeMono,
-                                color = chgColor
-                            )
-                        }
-                        state.volRank52w?.let { vr ->
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = colors.surfaceElevated,
-                                border = BorderStroke(1.dp, colors.borderSubtle)
-                            ) {
-                                Text(
-                                    text = "VR ${fmt0(vr)}%",
-                                    style = SchwabQuantTheme.numericTypography.badgeMono,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-                IconButton(onClick = onSearchTicker) {
-                    Icon(imageVector = Icons.Filled.Search, contentDescription = "Switch Ticker")
-                }
-                IconButton(onClick = onRefresh) {
-                    Icon(imageVector = Icons.Filled.Refresh, contentDescription = "Refresh")
-                }
-                IconButton(onClick = onTradeStock) {
-                    Icon(imageVector = Icons.Filled.AddShoppingCart, contentDescription = "Trade Stock")
-                }
-                IconButton(onClick = onAddSentinelStop) {
-                    Icon(imageVector = Icons.Outlined.Shield, contentDescription = "Add Sentinel Stop")
                 }
             }
         }

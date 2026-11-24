@@ -241,6 +241,102 @@ class BlackScholesEngine @Inject constructor() {
         return if (sigma.isFinite() && finalDiff <= 1e-3) sigma else null
     }
 
+    /**
+     * Bounded Brent root-finder for implied volatility over [0.01, 5.00] using exact (r, q, T).
+     * Returns null when the option trades at/below intrinsic floor or outside the [1%, 500%] bracket.
+     */
+    fun solveImpliedVolatility(
+        marketPrice: Double,
+        spot: Double,
+        strike: Double,
+        timeYears: Double,
+        rate: Double = DEFAULT_RISK_FREE_RATE,
+        dividendYield: Double = 0.0,
+        isCall: Boolean
+    ): Double? {
+        if (!marketPrice.isFinite() || !spot.isFinite() || !strike.isFinite() ||
+            !timeYears.isFinite() || !rate.isFinite() || !dividendYield.isFinite()
+        ) {
+            return null
+        }
+        if (spot <= 0.0 || strike <= 0.0 || timeYears <= 0.0 || marketPrice <= 0.0) {
+            return null
+        }
+
+        val lowBound = 0.01
+        val highBound = 5.00
+        val tol = 1e-5
+        var a = lowBound
+        var b = highBound
+        var fa = price(isCall, spot, strike, timeYears, rate, dividendYield, a) - marketPrice
+        var fb = price(isCall, spot, strike, timeYears, rate, dividendYield, b) - marketPrice
+
+        if (abs(fa) <= tol) return a
+        if (abs(fb) <= tol) return b
+        if (fa * fb > 0.0) return null
+
+        var c = a
+        var fc = fa
+        var d = b - a
+        var e = d
+
+        for (iter in 0 until IV_MAX_ITERATIONS) {
+            if ((fb > 0.0 && fc > 0.0) || (fb < 0.0 && fc < 0.0)) {
+                c = a
+                fc = fa
+                d = b - a
+                e = d
+            }
+            if (abs(fc) < abs(fb)) {
+                a = b
+                b = c
+                c = a
+                fa = fb
+                fb = fc
+                fc = fa
+            }
+
+            val tol1 = 2.0 * 1e-12 * abs(b) + 0.5 * tol
+            val xm = 0.5 * (c - b)
+            if (abs(xm) <= tol1 || abs(fb) <= tol) {
+                return b.takeIf { it.isFinite() && it in lowBound..highBound }
+            }
+
+            if (abs(e) >= tol1 && abs(fa) > abs(fb)) {
+                val s = fb / fa
+                var p: Double
+                var q: Double
+                if (a == c) {
+                    p = 2.0 * xm * s
+                    q = 1.0 - s
+                } else {
+                    val q0 = fa / fc
+                    val r0 = fb / fc
+                    p = s * (2.0 * xm * q0 * (q0 - r0) - (b - a) * (r0 - 1.0))
+                    q = (q0 - 1.0) * (r0 - 1.0) * (s - 1.0)
+                }
+                if (p > 0.0) q = -q else p = -p
+                if (2.0 * p < kotlin.math.min(3.0 * xm * q - abs(tol1 * q), abs(e * q))) {
+                    e = d
+                    d = p / q
+                } else {
+                    d = xm
+                    e = d
+                }
+            } else {
+                d = xm
+                e = d
+            }
+
+            a = b
+            fa = fb
+            b += if (abs(d) > tol1) d else if (xm >= 0.0) tol1 else -tol1
+            fb = price(isCall, spot, strike, timeYears, rate, dividendYield, b) - marketPrice
+        }
+
+        return b.takeIf { it.isFinite() && it in lowBound..highBound && abs(fb) <= 1e-3 }
+    }
+
     private fun normPdf(x: Double): Double =
         INV_SQRT_2PI * exp(-0.5 * x * x)
 

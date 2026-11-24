@@ -652,6 +652,55 @@ class OrderTicketViewModelTest {
         collectJob.cancel()
     }
 
+    @Test
+    fun `V1-8-2 switching between option and equity clears stale quote and BPR`() = runTest {
+        val harness = createHarness(isLive = false)
+        val collectJob = backgroundScope.launch { harness.viewModel.uiState.collect {} }
+
+        harness.stagedOrderHolder.stageDraft(
+            OrderDraft(
+                strategyCategory = OrderStrategyCategory.SINGLE_OPTION,
+                underlyingSymbol = "GOOG",
+                orderType = OrderType.LIMIT,
+                session = TradingSession.NORMAL,
+                duration = OrderDuration.DAY,
+                limitPrice = BigDecimal("2.50"),
+                legs = listOf(
+                    OrderLeg(
+                        symbol = "GOOG  261218C00280000",
+                        category = AssetCategory.OPTION,
+                        side = OrderSide.SELL_TO_OPEN,
+                        quantity = 1,
+                        underlyingSymbol = "GOOG",
+                        estimatedUnitPrice = BigDecimal("2.50")
+                    )
+                ),
+                estimatedBid = 2.40,
+                estimatedMid = 2.50,
+                estimatedAsk = 2.60,
+                estimatedBpr = 250.0,
+                sourceLabel = "Test Option Draft"
+            )
+        )
+        testScheduler.runCurrent()
+
+        assertEquals(2.40, harness.viewModel.uiState.value.quoteBid)
+        assertEquals(2.50, harness.viewModel.uiState.value.quoteMid)
+        assertEquals(2.60, harness.viewModel.uiState.value.quoteAsk)
+        assertEquals(250.0, harness.viewModel.uiState.value.estimatedBpr)
+
+        harness.viewModel.selectStrategyCategory(OrderStrategyCategory.SINGLE_EQUITY)
+        testScheduler.runCurrent()
+
+        val afterSwitch = harness.viewModel.uiState.value
+        assertEquals(OrderStrategyCategory.SINGLE_EQUITY, afterSwitch.strategyCategory)
+        assertEquals(null, afterSwitch.quoteBid)
+        assertEquals(null, afterSwitch.quoteMid)
+        assertEquals(null, afterSwitch.quoteAsk)
+        assertEquals(null, afterSwitch.estimatedBpr)
+        collectJob.cancel()
+    }
+
     private data class Harness(
         val viewModel: OrderTicketViewModel,
         val stagedOrderHolder: StagedOrderHolder,

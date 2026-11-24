@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.time.LocalDate
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -50,6 +51,7 @@ class MarketDataRepositoryImpl(
     private val quoteCache = ConcurrentHashMap<String, CachedEntry<QuoteEntryDto>>()
     private val optionChainCache = ConcurrentHashMap<String, CachedChainEntry>()
     private val priceHistoryCache = ConcurrentHashMap<String, CachedEntry<PriceHistoryResponseDto>>()
+    private val dailyClosesByTradingDateCache = ConcurrentHashMap<String, List<ChartCandle>>()
 
     override fun observeWatchlistSymbols(): Flow<List<String>> =
         observeWatchlists().map { lists ->
@@ -288,6 +290,7 @@ class MarketDataRepositoryImpl(
                 period = query.period,
                 frequencyType = query.frequencyType,
                 frequency = query.frequency,
+                endDate = now,
                 needExtendedHoursData = query.needExtendedHoursData
             )
             priceHistoryCache[cacheKey] = CachedEntry(fresh, nowProvider())
@@ -321,10 +324,35 @@ class MarketDataRepositoryImpl(
             periodType = periodType,
             period = period,
             frequencyType = frequencyType,
-            frequency = frequency
+            frequency = frequency,
+            endDate = now
         )
         priceHistoryCache[cacheKey] = CachedEntry(fresh, nowProvider())
         fresh
+    }
+
+    override suspend fun getDailyClosesForTradingDate(
+        symbol: String,
+        tradingDate: LocalDate,
+        forceRefresh: Boolean
+    ): Result<List<ChartCandle>> = runCatching {
+        val displaySym = SchwabSymbolNormalizer.toDisplaySymbol(symbol)
+        val dateKey = "$displaySym|$tradingDate"
+        if (!forceRefresh) {
+            dailyClosesByTradingDateCache[dateKey]?.let { return@runCatching it }
+        }
+        val candles = getChartCandles(
+            symbol = displaySym,
+            timeframe = ChartTimeframe.D1,
+            forceRefresh = forceRefresh
+        ).getOrThrow()
+        if (candles.isNotEmpty()) {
+            dailyClosesByTradingDateCache.keys
+                .filter { it.startsWith("$displaySym|") && it != dateKey }
+                .forEach { dailyClosesByTradingDateCache.remove(it) }
+            dailyClosesByTradingDateCache[dateKey] = candles
+        }
+        candles
     }
 
     private fun WatchlistEntity.toDomain(): Watchlist = Watchlist(

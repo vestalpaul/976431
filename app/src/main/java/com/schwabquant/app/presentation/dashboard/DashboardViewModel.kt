@@ -4,12 +4,16 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.schwabquant.app.core.handoff.GeminiHandoffManager
 import com.schwabquant.app.core.quant.BetaWeightingCalculator
+import com.schwabquant.app.core.quant.PortfolioStressCalculator
+import com.schwabquant.app.core.quant.StressIvMode
+import com.schwabquant.app.core.quant.StressMatrixSummary
 import com.schwabquant.app.core.quant.StressScenarioResult
 import com.schwabquant.app.data.local.entity.AuditLogEntity
 import com.schwabquant.app.data.local.prefs.AppPreferencesDataStore
 import com.schwabquant.app.domain.model.BearChecklistEvaluation
 import com.schwabquant.app.domain.model.ExecutionMode
 import com.schwabquant.app.domain.model.OrderDraft
+import com.schwabquant.app.domain.model.PmccValidationReport
 import com.schwabquant.app.domain.model.PortfolioDataSource
 import com.schwabquant.app.domain.model.PortfolioSnapshot
 import com.schwabquant.app.domain.model.RegimeStateHolder
@@ -22,6 +26,7 @@ import com.schwabquant.app.domain.usecase.ExDivRadarAlert
 import com.schwabquant.app.domain.usecase.GeneratePortfolioAdviceUseCase
 import com.schwabquant.app.domain.usecase.PortfolioAdviceCard
 import com.schwabquant.app.domain.usecase.TrackWashSalesUseCase
+import com.schwabquant.app.domain.usecase.ValidatePmccStructureUseCase
 import com.schwabquant.app.domain.usecase.WashSaleFlag
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -39,6 +44,9 @@ data class DashboardUiState(
     val selectedSource: PortfolioDataSource = PortfolioDataSource.SHADOW_PAPER_LEDGER,
     val snapshot: PortfolioSnapshot? = null,
     val stressMatrix: List<StressScenarioResult> = emptyList(),
+    val stressSummary: StressMatrixSummary? = null,
+    val stressIvMode: StressIvMode = StressIvMode.TERM_STRUCTURE_SQRT,
+    val pmccReport: PmccValidationReport? = null,
     val includeVolSkewShock: Boolean = true,
     val washSaleFlags: List<WashSaleFlag> = emptyList(),
     val exDivAlerts: List<ExDivRadarAlert> = emptyList(),
@@ -58,6 +66,8 @@ class DashboardViewModel @Inject constructor(
     private val portfolioRepository: PortfolioRepository,
     private val orderRepository: OrderRepository,
     private val betaWeightingCalculator: BetaWeightingCalculator,
+    private val portfolioStressCalculator: PortfolioStressCalculator,
+    private val validatePmccStructureUseCase: ValidatePmccStructureUseCase,
     private val trackWashSalesUseCase: TrackWashSalesUseCase,
     private val evaluateExDivRadarUseCase: EvaluateExDivRadarUseCase,
     private val generatePortfolioAdviceUseCase: GeneratePortfolioAdviceUseCase,
@@ -67,6 +77,7 @@ class DashboardViewModel @Inject constructor(
 ) : ViewModel() {
 
     private val includeVolSkewShockState = MutableStateFlow(true)
+    private val stressIvModeState = MutableStateFlow(StressIvMode.TERM_STRUCTURE_SQRT)
     private val expandedGroupsState = MutableStateFlow<Set<String>>(emptySet())
     private val isRefreshingState = MutableStateFlow(false)
     private val snackbarState = MutableStateFlow<String?>(null)
@@ -88,6 +99,7 @@ class DashboardViewModel @Inject constructor(
         val orders: List<WorkingOrder>,
         val logs: List<AuditLogEntity>,
         val includeVolSkew: Boolean,
+        val stressIvMode: StressIvMode,
         val expanded: Set<String>
     )
 
@@ -111,9 +123,10 @@ class DashboardViewModel @Inject constructor(
         orderRepository.observeWorkingOrders(),
         orderRepository.observeRecentAuditLogs(25),
         includeVolSkewShockState,
+        stressIvModeState,
         expandedGroupsState
-    ) { orders, logs, volSkew, expanded ->
-        OrderUiTuple(orders, logs, volSkew, expanded)
+    ) { orders, logs, volSkew, ivMode, expanded ->
+        OrderUiTuple(orders, logs, volSkew, ivMode, expanded)
     }
 
     private val chromeFlow = combine(
@@ -130,15 +143,23 @@ class DashboardViewModel @Inject constructor(
         chromeFlow
     ) { core, orderUi, chrome ->
         val snapshot = core.snapshot
-        val stressMatrix = if (snapshot != null && snapshot.positions.isNotEmpty()) {
-            betaWeightingCalculator.computeStressMatrix(
+        val stressSummary = if (snapshot != null && snapshot.positions.isNotEmpty()) {
+            portfolioStressCalculator.computeStressSummary(
                 positions = snapshot.positions,
                 accountNetLiq = snapshot.accountSummary.netLiquidationValue.toDouble(),
-                spyPrice = snapshot.spySpot,
-                includeVolSkewShock = orderUi.includeVolSkew
+                spySpot = snapshot.spySpot,
+                spyBetaDelta = snapshot.aggregatedGreeks.spyBetaWeightedDelta,
+                includeVolSkewShock = orderUi.includeVolSkew,
+                ivMode = orderUi.stressIvMode
             )
         } else {
-            emptyList()
+            null
+        }
+        val stressMatrix = stressSummary?.scenarios.orEmpty()
+        val pmccReport = if (snapshot != null && snapshot.positions.isNotEmpty()) {
+            validatePmccStructureUseCase.validatePortfolio(snapshot.positions)
+        } else {
+            null
         }
 
         val exDivAlerts = if (snapshot != null) {
@@ -158,6 +179,9 @@ class DashboardViewModel @Inject constructor(
             selectedSource = core.source,
             snapshot = snapshot,
             stressMatrix = stressMatrix,
+            stressSummary = stressSummary,
+            stressIvMode = orderUi.stressIvMode,
+            pmccReport = pmccReport,
             includeVolSkewShock = orderUi.includeVolSkew,
             washSaleFlags = core.washFlags,
             exDivAlerts = exDivAlerts,
@@ -266,6 +290,10 @@ class DashboardViewModel @Inject constructor(
         includeVolSkewShockState.value = enabled
     }
 
+    fun selectStressIvMode(mode: StressIvMode) {
+        stressIvModeState.value = mode
+    }
+
     fun toggleGroupExpanded(underlyingSymbol: String) {
         val current = expandedGroupsState.value.toMutableSet()
         if (!current.add(underlyingSymbol)) {
@@ -325,7 +353,9 @@ class DashboardViewModel @Inject constructor(
             stressMatrix = state.stressMatrix,
             washSaleFlags = state.washSaleFlags,
             exDivAlerts = state.exDivAlerts,
-            regime = regimeStateHolder.currentEvaluation.value
+            regime = regimeStateHolder.currentEvaluation.value,
+            stressSummary = state.stressSummary,
+            pmccReport = state.pmccReport
         )
         val result = geminiHandoffManager.handoffPrompt(prompt)
         snackbarState.value = result.message

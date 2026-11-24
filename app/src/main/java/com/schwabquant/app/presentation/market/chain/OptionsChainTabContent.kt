@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,9 +38,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.schwabquant.app.core.quant.ChainColumnPreset
 import com.schwabquant.app.core.quant.ExpirationChainSection
+import com.schwabquant.app.core.quant.ExpirationCycleTag
 import com.schwabquant.app.core.quant.OptionStrikeRow
 import com.schwabquant.app.core.quant.ParsedOptionContract
 import com.schwabquant.app.core.quant.SelectedChainLeg
@@ -182,7 +186,7 @@ fun OptionsChainTabContent(
         }
 
         // 3. Sticky Bottom Spread Builder Dock
-        if (state.spreadBuilderEnabled && state.selectedSpreadLegs.isNotEmpty()) {
+        if (state.spreadBuilderEnabled) {
             SpreadBuilderDock(
                 state = state,
                 onClear = onClearSpread,
@@ -199,6 +203,11 @@ private fun ExpirationAccordionHeader(
     onToggle: () -> Unit
 ) {
     val colors = SchwabQuantTheme.colors
+    val compactCycle = when (section.cycleTag) {
+        ExpirationCycleTag.WEEKLY -> "WK"
+        ExpirationCycleTag.MONTHLY -> "MO"
+        ExpirationCycleTag.LEAPS -> "LEAP"
+    }
     Surface(
         color = colors.surfaceElevated,
         border = BorderStroke(0.5.dp, colors.borderSubtle),
@@ -209,38 +218,49 @@ private fun ExpirationAccordionHeader(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                Text(
-                    text = "${section.formattedDate} (${section.dte}D)",
-                    style = SchwabQuantTheme.numericTypography.metricValue,
-                    fontWeight = FontWeight.Bold
-                )
-                Surface(
-                    shape = RoundedCornerShape(4.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = section.cycleTag.badge,
-                        style = SchwabQuantTheme.numericTypography.badgeMono,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        text = "${section.formattedDate} (${section.dte}D)",
+                        style = SchwabQuantTheme.numericTypography.metricValue,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Text(
+                            text = compactCycle,
+                            style = SchwabQuantTheme.numericTypography.badgeMono,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
+                Text(
+                    text = "IV ${fmt1(section.atmIvPct)}% • ±$${fmt2(section.expectedMoveDollars)} (${fmt1(section.expectedMovePct)}%)",
+                    style = SchwabQuantTheme.numericTypography.greekValue,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
-            Text(
-                text = "IV ${fmt1(section.atmIvPct)}% • ±$${fmt2(section.expectedMoveDollars)} (${fmt1(section.expectedMovePct)}%)",
-                style = SchwabQuantTheme.numericTypography.greekValue,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.width(4.dp))
             Icon(
                 imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                 contentDescription = if (expanded) "Collapse" else "Expand"
@@ -380,77 +400,104 @@ private fun OptionHalfCell(
 
     val colors = SchwabQuantTheme.colors
     val subLine = when (preset) {
-        ChainColumnPreset.EXECUTION -> "Mk ${fmt2(contract.mid)} • OI ${contract.openInterest}"
-        ChainColumnPreset.GREEKS -> "Δ ${fmt2(contract.delta)} • Θ ${fmt2(contract.thetaPerDay)} • IV ${fmt0(contract.iv * 100)}%"
-        ChainColumnPreset.INCOME_PMCC -> "Δ ${fmt2(contract.delta)} • Ext $${fmt2(contract.extrinsicValue)} • ${fmt0(abs(contract.delta) * 100)}%"
+        ChainColumnPreset.EXECUTION -> "Mk ${fmt2(contract.mid)} OI ${contract.openInterest}"
+        ChainColumnPreset.GREEKS -> "Δ${fmtCompactDec(contract.delta)} Θ${fmtCompactDec(contract.thetaPerDay)} ${fmt0(contract.iv * 100)}%"
+        ChainColumnPreset.INCOME_PMCC -> "Δ${fmtCompactDec(contract.delta)} Ext$${fmt2(contract.extrinsicValue)} ${fmt0(abs(contract.delta) * 100)}%"
     }
 
-    val badgeText = when (selected?.side) {
-        OrderSide.BUY_TO_OPEN -> "B"
-        OrderSide.SELL_TO_OPEN -> "S"
-        else -> null
-    }
-    val badgeColor = when (selected?.side) {
-        OrderSide.BUY_TO_OPEN -> colors.profit
-        OrderSide.SELL_TO_OPEN -> colors.loss
-        else -> Color.Transparent
-    }
+    val isBidSelected = selected?.side == OrderSide.SELL_TO_OPEN
+    val isAskSelected = selected?.side == OrderSide.BUY_TO_OPEN
 
     Column(
         modifier = modifier
             .background(bg)
-            .padding(horizontal = 6.dp, vertical = 4.dp),
+            .padding(horizontal = 4.dp, vertical = 4.dp),
         horizontalAlignment = if (isPutSide) Alignment.End else Alignment.Start,
-        verticalArrangement = Arrangement.spacedBy(2.dp)
+        verticalArrangement = Arrangement.spacedBy(3.dp)
     ) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (badgeText != null) {
-                Surface(
-                    shape = RoundedCornerShape(3.dp),
-                    color = badgeColor.copy(alpha = 0.2f),
-                    border = BorderStroke(1.dp, badgeColor)
+            Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = if (isBidSelected) colors.loss.copy(alpha = 0.28f) else colors.loss.copy(alpha = 0.10f),
+                border = if (isBidSelected) BorderStroke(1.5.dp, colors.loss) else null,
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 36.dp)
+                    .clickable { onQuoteTapped(contract, OrderSide.SELL_TO_OPEN) }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    if (isBidSelected) {
+                        Text(
+                            text = "S ",
+                            style = SchwabQuantTheme.numericTypography.badgeMono,
+                            color = colors.loss,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                     Text(
-                        text = badgeText,
-                        style = SchwabQuantTheme.numericTypography.badgeMono,
-                        color = badgeColor,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                        text = fmt2(contract.bid),
+                        style = SchwabQuantTheme.numericTypography.greekValue,
+                        color = colors.loss,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
             Surface(
                 shape = RoundedCornerShape(4.dp),
-                color = colors.loss.copy(alpha = 0.10f),
-                modifier = Modifier.clickable { onQuoteTapped(contract, OrderSide.SELL_TO_OPEN) }
+                color = if (isAskSelected) colors.profit.copy(alpha = 0.28f) else colors.profit.copy(alpha = 0.10f),
+                border = if (isAskSelected) BorderStroke(1.5.dp, colors.profit) else null,
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 36.dp)
+                    .clickable { onQuoteTapped(contract, OrderSide.BUY_TO_OPEN) }
             ) {
-                Text(
-                    text = fmt2(contract.bid),
-                    style = SchwabQuantTheme.numericTypography.greekValue,
-                    color = colors.loss,
-                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                )
-            }
-            Surface(
-                shape = RoundedCornerShape(4.dp),
-                color = colors.profit.copy(alpha = 0.10f),
-                modifier = Modifier.clickable { onQuoteTapped(contract, OrderSide.BUY_TO_OPEN) }
-            ) {
-                Text(
-                    text = fmt2(contract.ask),
-                    style = SchwabQuantTheme.numericTypography.greekValue,
-                    color = colors.profit,
-                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isAskSelected) {
+                        Text(
+                            text = "B ",
+                            style = SchwabQuantTheme.numericTypography.badgeMono,
+                            color = colors.profit,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                    Text(
+                        text = fmt2(contract.ask),
+                        style = SchwabQuantTheme.numericTypography.greekValue,
+                        color = colors.profit,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
             }
         }
         Text(
             text = subLine,
-            style = SchwabQuantTheme.numericTypography.badgeMono,
+            style = SchwabQuantTheme.numericTypography.badgeMono.copy(
+                fontSize = 10.sp,
+                lineHeight = 12.sp,
+                letterSpacing = 0.sp
+            ),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
@@ -478,8 +525,12 @@ private fun SpreadBuilderDock(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = preview?.strategyLabel
-                            ?: "${state.selectedSpreadLegs.size} legs selected (adjust legs to form valid spread)",
+                        text = when {
+                            state.selectedSpreadLegs.isEmpty() ->
+                                "Spread Builder: Select 1–4 legs (Bid=Sell, Ask=Buy)"
+                            preview != null -> preview.strategyLabel
+                            else -> "${state.selectedSpreadLegs.size} legs selected (adjust legs to form valid spread)"
+                        },
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -488,7 +539,10 @@ private fun SpreadBuilderDock(
                         Text(
                             text = "$flowTag \$${preview.limitPrice.toPlainString()} • BPR $${fmt0(preview.estimatedBpr)} • Δ ${fmt2(preview.netDelta)} • Θ $${fmt2(preview.netThetaPerDay)}/d",
                             style = SchwabQuantTheme.numericTypography.greekValue,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -499,19 +553,29 @@ private fun SpreadBuilderDock(
             ) {
                 OutlinedButton(
                     onClick = onClear,
+                    enabled = state.selectedSpreadLegs.isNotEmpty(),
                     modifier = Modifier.weight(0.4f)
                 ) {
-                    Text("Clear")
+                    Text("Clear", maxLines = 1, softWrap = false)
                 }
                 Button(
                     onClick = onStage,
                     enabled = preview != null,
                     modifier = Modifier.weight(0.6f)
                 ) {
-                    Text("Stage Spread (${state.selectedSpreadLegs.size})")
+                    Text("Stage Spread (${state.selectedSpreadLegs.size})", maxLines = 1, softWrap = false)
                 }
             }
         }
+    }
+}
+
+private fun fmtCompactDec(v: Double): String {
+    val raw = fmt2(v)
+    return when {
+        raw.startsWith("-0.") -> "-." + raw.substring(3)
+        raw.startsWith("0.") -> raw.substring(1)
+        else -> raw
     }
 }
 

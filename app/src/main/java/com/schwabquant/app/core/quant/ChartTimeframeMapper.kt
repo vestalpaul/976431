@@ -2,6 +2,7 @@ package com.schwabquant.app.core.quant
 
 import com.schwabquant.app.data.remote.dto.CandleDto
 import com.schwabquant.app.data.remote.dto.SchwabSymbolNormalizer
+import java.time.DayOfWeek
 import java.time.Instant
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
@@ -176,4 +177,39 @@ object ChartTimeframeMapper {
             )
         }.sortedBy { it.epochSeconds }
     }
+
+    fun alignEpochSecondsToBucket(
+        epochSeconds: Long,
+        timeframe: ChartTimeframe,
+        zoneId: ZoneId = NEW_YORK_ZONE
+    ): Long = when (timeframe) {
+        ChartTimeframe.M1 -> epochSeconds - Math.floorMod(epochSeconds, 60L)
+        ChartTimeframe.M5 -> epochSeconds - Math.floorMod(epochSeconds, 300L)
+        ChartTimeframe.M15 -> epochSeconds - Math.floorMod(epochSeconds, 900L)
+        ChartTimeframe.M30 -> epochSeconds - Math.floorMod(epochSeconds, 1_800L)
+        ChartTimeframe.H1 -> Instant.ofEpochSecond(epochSeconds)
+            .atZone(zoneId)
+            .truncatedTo(ChronoUnit.HOURS)
+            .toEpochSecond()
+        ChartTimeframe.D1 -> Instant.ofEpochSecond(epochSeconds)
+            .atZone(zoneId)
+            .toLocalDate()
+            .atStartOfDay(zoneId)
+            .toEpochSecond()
+        ChartTimeframe.W1 -> Instant.ofEpochSecond(epochSeconds)
+            .atZone(zoneId)
+            .toLocalDate()
+            .with(DayOfWeek.MONDAY)
+            .atStartOfDay(zoneId)
+            .toEpochSecond()
+    }
+
+    fun isSameBucket(
+        barEpochSeconds: Long,
+        tickEpochSeconds: Long,
+        timeframe: ChartTimeframe,
+        zoneId: ZoneId = NEW_YORK_ZONE
+    ): Boolean =
+        alignEpochSecondsToBucket(barEpochSeconds, timeframe, zoneId) ==
+            alignEpochSecondsToBucket(tickEpochSeconds, timeframe, zoneId)
 }

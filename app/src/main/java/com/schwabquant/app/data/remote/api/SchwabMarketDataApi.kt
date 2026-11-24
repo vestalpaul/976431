@@ -34,6 +34,7 @@ interface SchwabMarketDataApi {
         @Query("period") period: Int = 1,
         @Query("frequencyType") frequencyType: String = "daily",
         @Query("frequency") frequency: Int = 1,
+        @Query("endDate") endDate: Long? = null,
         @Query("needExtendedHoursData") needExtendedHoursData: Boolean? = null
     ): PriceHistoryResponseDto
 }

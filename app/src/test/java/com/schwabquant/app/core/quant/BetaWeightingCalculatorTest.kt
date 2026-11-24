@@ -1,11 +1,32 @@
 package com.schwabquant.app.core.quant
 
+import com.schwabquant.app.core.security.CredentialVault
+import com.schwabquant.app.data.local.dao.ShadowLedgerDao
+import com.schwabquant.app.data.local.dao.WashSaleDao
+import com.schwabquant.app.data.local.prefs.AppPreferencesDataStore
+import com.schwabquant.app.data.remote.api.SchwabTraderApi
+import com.schwabquant.app.data.remote.dto.AccountWrapperDto
+import com.schwabquant.app.data.remote.dto.BalancesDto
+import com.schwabquant.app.data.remote.dto.InstrumentDto
+import com.schwabquant.app.data.remote.dto.PositionDto
+import com.schwabquant.app.data.remote.dto.QuoteDetailDto
+import com.schwabquant.app.data.remote.dto.QuoteEntryDto
+import com.schwabquant.app.data.remote.dto.SecuritiesAccountDto
+import com.schwabquant.app.data.repository.PortfolioRepositoryImpl
 import com.schwabquant.app.domain.model.AssetCategory
+import com.schwabquant.app.domain.model.PortfolioAnomalyType
 import com.schwabquant.app.domain.model.Position
+import com.schwabquant.app.domain.repository.MarketDataRepository
+import io.mockk.coEvery
+import io.mockk.every
+import io.mockk.mockk
+import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
+import kotlin.math.abs
 
 class BetaWeightingCalculatorTest {
 
@@ -110,5 +131,121 @@ class BetaWeightingCalculatorTest {
         val up15Skew = withVolSkew.last().portfolioDollarPnl
         val up15Flat = withoutVolSkew.last().portfolioDollarPnl
         assertTrue(up15Skew < up15Flat)
+    }
+
+    @Test
+    fun `betaScalingAndLowCorrelationGuard scales shocks and protects bond ETFs plus emits BETA_FALLBACK`() = runTest {
+        val equityBeta1 = Position(
+            symbol = "NVDA",
+            underlyingSymbol = "NVDA",
+            category = AssetCategory.EQUITY,
+            quantity = BigDecimal("100"),
+            averageCost = BigDecimal("140.0"),
+            markPrice = BigDecimal("150.0"),
+            marketValue = BigDecimal("15000.0"),
+            unrealizedPnl = BigDecimal("1000.0"),
+            unrealizedPnlPercent = 7.14,
+            delta = 1.0,
+            betaToSpy = 1.0,
+            underlyingSpot = 150.0
+        )
+        val equityBeta2 = equityBeta1.copy(betaToSpy = 2.0)
+
+        val bwd1 = calculator.calculateSpyBetaWeightedDelta(listOf(equityBeta1), spyPrice = 500.0)
+        val bwd2 = calculator.calculateSpyBetaWeightedDelta(listOf(equityBeta2), spyPrice = 500.0)
+        assertEquals(bwd1 * 2.0, bwd2, 1e-6)
+
+        val shock1 = calculator.computeStressMatrix(listOf(equityBeta1), 20_000.0, 500.0, includeVolSkewShock = false)
+            .first { it.spyShockPercent == 10.0 }.portfolioDollarPnl
+        val shock2 = calculator.computeStressMatrix(listOf(equityBeta2), 20_000.0, 500.0, includeVolSkewShock = false)
+            .first { it.spyShockPercent == 10.0 }.portfolioDollarPnl
+        assertEquals(shock1 * 2.0, shock2, 1e-6)
+
+        // Low-correlation bond ETF (SGOV): 90 days where SPY fluctuates ±1.2% and SGOV ticks +0.015%/day flatly
+        val spyCloses = mutableListOf(500.0)
+        val sgovCloses = mutableListOf(100.0)
+        for (i in 1..100) {
+            val spyRet = when (i % 4) {
+                0 -> 0.012
+                1 -> -0.008
+                2 -> 0.015
+                else -> -0.011
+            }
+            // Coprime period-5 daily accrual uncorrelated with SPY's period-4 cycle (R^2 < 0.05)
+            val sgovRet = when (i % 5) {
+                0 -> 0.00022
+                1 -> 0.00018
+                2 -> 0.00020
+                3 -> 0.00017
+                else -> 0.00021
+            }
+            spyCloses.add(spyCloses.last() * (1.0 + spyRet))
+            sgovCloses.add(sgovCloses.last() * (1.0 + sgovRet))
+        }
+        val sgovBeta = calculator.computeRollingOlsBeta(sgovCloses, spyCloses, applyBlumeShrinkage = true)
+        assertNotNull(sgovBeta)
+        assertEquals(BetaSource.OLS_252D, sgovBeta!!.source)
+        assertTrue((sgovBeta.rSquared ?: 1.0) < 0.10, "Expected R^2 < 0.10, got ${sgovBeta.rSquared}")
+        assertTrue(
+            abs(sgovBeta.beta) < 0.10,
+            "Low-correlation SGOV ETF must NOT be shrunk toward 1.0 (~0.33), got ${sgovBeta.beta}"
+        )
+
+        // High-correlation stock with raw beta ~1.60 receives Blume shrinkage -> (2/3)*1.60 + 1/3 = 1.40
+        val nvdaCloses = mutableListOf(100.0)
+        for (i in 1 until spyCloses.size) {
+            val spyRet = (spyCloses[i] - spyCloses[i - 1]) / spyCloses[i - 1]
+            nvdaCloses.add(nvdaCloses.last() * (1.0 + 1.60 * spyRet))
+        }
+        val nvdaBeta = calculator.computeRollingOlsBeta(nvdaCloses, spyCloses, applyBlumeShrinkage = true)
+        assertNotNull(nvdaBeta)
+        assertEquals(1.40, nvdaBeta!!.beta, 1e-3)
+
+        // Missing history AND missing fundamental.beta emits BetaSource.FALLBACK_1_0 + BETA_FALLBACK anomaly
+        val traderApi = mockk<SchwabTraderApi>(relaxed = true)
+        val marketDataRepo = mockk<MarketDataRepository>(relaxed = true)
+        val vault = mockk<CredentialVault>(relaxed = true) {
+            every { getPrimaryAccountHash() } returns "HASH_FALLBACK"
+            every { getAccessToken() } returns "TOKEN"
+        }
+        coEvery { traderApi.getAccount("HASH_FALLBACK", fields = "positions") } returns AccountWrapperDto(
+            securitiesAccount = SecuritiesAccountDto(
+                accountNumber = "12345678",
+                currentBalances = BalancesDto(liquidationValue = 20_000.0, cashBalance = 5_000.0),
+                positions = listOf(
+                    PositionDto(
+                        longQuantity = 50.0,
+                        averagePrice = 100.0,
+                        marketValue = 5_000.0,
+                        instrument = InstrumentDto(symbol = "PLTR", assetType = "EQUITY")
+                    )
+                )
+            )
+        )
+        coEvery { marketDataRepo.getQuotes(any(), any()) } returns Result.success(
+            mapOf(
+                "SPY" to QuoteEntryDto("SPY", quote = QuoteDetailDto(mark = 585.0)),
+                "PLTR" to QuoteEntryDto("PLTR", quote = QuoteDetailDto(mark = 100.0), fundamental = null)
+            )
+        )
+        coEvery { marketDataRepo.getDailyClosesForTradingDate(any(), any(), any()) } returns
+            Result.success(emptyList())
+
+        val repo = PortfolioRepositoryImpl(
+            traderApi = traderApi,
+            marketDataRepository = marketDataRepo,
+            shadowLedgerDao = mockk<ShadowLedgerDao>(relaxed = true),
+            washSaleDao = mockk<WashSaleDao>(relaxed = true),
+            credentialVault = vault,
+            preferences = mockk<AppPreferencesDataStore>(relaxed = true),
+            blackScholesEngine = blackScholes,
+            betaWeightingCalculator = calculator,
+            occSymbolFormatter = OccSymbolFormatter()
+        )
+        val snapshot = repo.refreshLivePortfolio("HASH_FALLBACK").getOrThrow()
+        val pltrPos = snapshot.positions.single()
+        assertEquals(1.0, pltrPos.betaToSpy!!, 1e-9)
+        assertEquals(BetaSource.FALLBACK_1_0, pltrPos.betaSource)
+        assertTrue(snapshot.portfolioAnomalies.any { it.type == PortfolioAnomalyType.BETA_FALLBACK && it.symbol == "PLTR" })
     }
 }

@@ -68,7 +68,14 @@
       const sma200Series = makeLine('#EC4899', 1.5, 'SMA200');
       const rmaFastSeries = makeLine('#2DD4BF', 1.5, 'RMA9');
       const rmaSlowSeries = makeLine('#FB7185', 1.5, 'RMA21');
-      const vwapSeries = makeLine('#FBBF24', 1.5, 'VWAP');
+      const vwapSeries = mainChart.addLineSeries({
+        color: '#FBBF24',
+        lineWidth: 1.5,
+        priceLineVisible: false,
+        lastValueVisible: true,
+        crosshairMarkerVisible: false,
+        title: 'VWAP'
+      });
 
       const rsiChart = LightweightCharts.createChart(rsiContainer, {
         layout: { background: { color: '#000000' }, textColor: '#8B949E', fontSize: 10 },
@@ -87,6 +94,7 @@
 
       let rsiGuideLines = [];
       let activePriceLines = [];
+      let lastCandleTime = null;
       let barLookup = new Map();
       let indLookup = {
         ema9: new Map(), ema21: new Map(), sma50: new Map(), sma200: new Map(),
@@ -222,6 +230,7 @@
 
           barLookup = new Map();
           const cArr = data.candles || [];
+          lastCandleTime = cArr.length > 0 ? Number(cArr[cArr.length - 1].time) : null;
           const vArr = data.volume || [];
           const vByTime = new Map();
           for (let i = 0; i < vArr.length; i++) vByTime.set(vArr[i].time, Math.round(vArr[i].value));
@@ -275,10 +284,17 @@
         try {
           const update = JSON.parse(barJsonStr);
           if (update.candle) {
-            candleSeries.update(update.candle);
             const c = update.candle;
-            const prevMeta = barLookup.get(c.time);
-            barLookup.set(c.time, {
+            const t = Number(c.time);
+            if (lastCandleTime !== null && t < lastCandleTime) {
+              return;
+            }
+            candleSeries.update(c);
+            if (lastCandleTime === null || t > lastCandleTime) {
+              lastCandleTime = t;
+            }
+            const prevMeta = barLookup.get(t);
+            barLookup.set(t, {
               open: c.open,
               high: c.high,
               low: c.low,
@@ -287,7 +303,10 @@
             });
           }
           if (update.volume) {
-            volumeSeries.update(update.volume);
+            const vt = Number(update.volume.time);
+            if (lastCandleTime === null || vt >= lastCandleTime) {
+              volumeSeries.update(update.volume);
+            }
           }
         } catch (e) {}
       };

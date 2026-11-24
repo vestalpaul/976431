@@ -193,7 +193,7 @@ fun LightweightChartWebView(
         webView.evaluateJavascript("window.sqSetChartData(${jsStringLiteral(json)});", null)
     }
 
-    LaunchedEffect(isChartReady, priceLines) {
+    LaunchedEffect(isChartReady, chartDataPayload, priceLines) {
         if (!isChartReady) return@LaunchedEffect
         val json = ChartBridgeJson.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(JsPriceLine.serializer()),

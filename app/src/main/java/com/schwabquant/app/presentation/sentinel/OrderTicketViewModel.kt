@@ -333,10 +333,16 @@ class OrderTicketViewModel @Inject constructor(
             }
         }
 
-        val refPx = current.quoteMid
+        val domainChanged = isOptionCategory(current.strategyCategory) != isOptionCategory(category)
+        val nextBid = if (domainChanged) null else current.quoteBid
+        val nextMid = if (domainChanged) null else current.quoteMid
+        val nextAsk = if (domainChanged) null else current.quoteAsk
+        val nextBpr = if (domainChanged) null else current.estimatedBpr
+
+        val refPx = nextMid
             ?: current.limitPriceInput.toDoubleOrNull()
-            ?: current.quoteBid
-            ?: current.quoteAsk
+            ?: nextBid
+            ?: nextAsk
         val derivedOcoTp = if (category == OrderStrategyCategory.OCO_BRACKET && current.ocoTakeProfitInput.isBlank() && refPx != null && refPx > 0.0) {
             BigDecimal.valueOf(refPx * 1.05).setScale(2, RoundingMode.HALF_UP).toPlainString()
         } else {
@@ -358,13 +364,23 @@ class OrderTicketViewModel @Inject constructor(
             ocoTakeProfitInput = derivedOcoTp,
             ocoStopPriceInput = derivedOcoSl,
             legs = updatedLegs,
+            quoteBid = nextBid,
+            quoteMid = nextMid,
+            quoteAsk = nextAsk,
+            estimatedBpr = nextBpr,
             walkUpEnabled = if (walkUpAllowed) current.walkUpEnabled else false,
             replacePriorOrderId = null,
             isEscalatedReprice = false,
             pendingRiskAssessment = null,
             readyForBiometricSwipe = false
         )
+        if (domainChanged) {
+            refreshQuoteContext(cleanSym, updatedLegs)
+        }
     }
+
+    private fun isOptionCategory(category: OrderStrategyCategory): Boolean =
+        category != OrderStrategyCategory.SINGLE_EQUITY && category != OrderStrategyCategory.OCO_BRACKET
 
     fun updateUnderlyingSymbol(sym: String) {
         val clean = sym.trim().uppercase()
@@ -381,6 +397,10 @@ class OrderTicketViewModel @Inject constructor(
             ocoTakeProfitInput = "",
             ocoStopPriceInput = "",
             legs = updatedLegs,
+            quoteBid = null,
+            quoteMid = null,
+            quoteAsk = null,
+            estimatedBpr = null,
             walkUpEnabled = if (walkUpAllowed) s.walkUpEnabled else false,
             replacePriorOrderId = null,
             isEscalatedReprice = false,

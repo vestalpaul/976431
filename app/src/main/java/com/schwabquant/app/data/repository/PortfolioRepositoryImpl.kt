@@ -1,8 +1,13 @@
 package com.schwabquant.app.data.repository
 
+import com.schwabquant.app.core.quant.BetaEstimate
+import com.schwabquant.app.core.quant.BetaSource
 import com.schwabquant.app.core.quant.BetaWeightingCalculator
 import com.schwabquant.app.core.quant.BlackScholesEngine
+import com.schwabquant.app.core.quant.ChartCandle
 import com.schwabquant.app.core.quant.OccSymbolFormatter
+import com.schwabquant.app.core.quant.PortfolioStressCalculator
+import com.schwabquant.app.core.quant.StressIvMode
 import com.schwabquant.app.core.security.CredentialVault
 import com.schwabquant.app.data.local.dao.ShadowLedgerDao
 import com.schwabquant.app.data.local.dao.WashSaleDao
@@ -83,8 +88,11 @@ class PortfolioRepositoryImpl(
         nowProvider = System::currentTimeMillis
     )
 
+    private val stressCalculator = PortfolioStressCalculator(blackScholesEngine)
+    private val dailyBetaCache = java.util.concurrent.ConcurrentHashMap<String, BetaEstimate>()
     private val liveSnapshotState = MutableStateFlow<PortfolioSnapshot?>(null)
     private val shadowLiveQuotesState = MutableStateFlow<Map<String, QuoteEntryDto>>(emptyMap())
+    private val shadowOlsBetasState = MutableStateFlow<Map<String, BetaEstimate>>(emptyMap())
 
     override fun observePortfolioSnapshot(source: PortfolioDataSource): Flow<PortfolioSnapshot?> =
         when (source) {
@@ -92,12 +100,14 @@ class PortfolioRepositoryImpl(
             PortfolioDataSource.SHADOW_PAPER_LEDGER -> combine(
                 shadowLedgerDao.observePositions(),
                 preferences.shadowCashBalance,
-                shadowLiveQuotesState
-            ) { entities, cashBalance, liveQuotes ->
+                shadowLiveQuotesState,
+                shadowOlsBetasState
+            ) { entities, cashBalance, liveQuotes, olsBetas ->
                 buildShadowSnapshot(
                     entities = entities,
                     cashBalance = cashBalance,
-                    quotes = liveQuotes
+                    quotes = liveQuotes,
+                    olsBetas = olsBetas
                 )
             }
         }
@@ -140,7 +150,10 @@ class PortfolioRepositoryImpl(
             val quotes = marketDataRepository.getQuotes(symbols, forceRefresh = true)
                 .getOrElse { emptyMap() }
 
-            val snapshot = buildLiveSnapshot(resolvedHash, account, quotes)
+            val today = Instant.ofEpochMilli(nowProvider()).atZone(NY_ZONE).toLocalDate()
+            val olsBetas = resolveOlsBetas(collectBetaEligibleUnderlyings(account), today)
+
+            val snapshot = buildLiveSnapshot(resolvedHash, account, quotes, olsBetas)
             liveSnapshotState.value = snapshot
             snapshot
         }
@@ -156,7 +169,7 @@ class PortfolioRepositoryImpl(
             val account = wrapper.securitiesAccount
                 ?: error("Schwab returned empty securitiesAccount payload.")
 
-            buildLiveSnapshot(resolvedHash, account, quotes = emptyMap())
+            buildLiveSnapshot(resolvedHash, account, quotes = emptyMap(), olsBetas = emptyMap())
         }
 
     override suspend fun refreshShadowPortfolio(): Result<PortfolioSnapshot> = runCatching {
@@ -177,11 +190,27 @@ class PortfolioRepositoryImpl(
             emptyMap()
         }
 
+        val today = Instant.ofEpochMilli(nowProvider()).atZone(NY_ZONE).toLocalDate()
+        val olsBetas = if (credentialVault.getAccessToken() != null && entities.isNotEmpty()) {
+            val underlyings = entities.mapNotNull { entity ->
+                val cat = runCatching { AssetCategory.valueOf(entity.assetType) }.getOrDefault(AssetCategory.EQUITY)
+                if (cat == AssetCategory.CASH || cat == AssetCategory.INDEX) null
+                else SchwabSymbolNormalizer.toDisplaySymbol(
+                    entity.underlyingSymbol.ifBlank { occSymbolFormatter.parse(entity.symbol)?.root ?: entity.symbol }
+                )
+            }.distinct()
+            resolveOlsBetas(underlyings, today)
+        } else {
+            emptyMap()
+        }
+
         shadowLiveQuotesState.value = liveQuotes
+        shadowOlsBetasState.value = olsBetas
         buildShadowSnapshot(
             entities = entities,
             cashBalance = cashBalance,
-            quotes = liveQuotes
+            quotes = liveQuotes,
+            olsBetas = olsBetas
         )
     }
 
@@ -296,17 +325,102 @@ class PortfolioRepositoryImpl(
             }
         }.distinct()
 
+    private fun collectBetaEligibleUnderlyings(account: SecuritiesAccountDto): List<String> =
+        account.positions.mapNotNull { dto ->
+            val inst = dto.instrument ?: return@mapNotNull null
+            val category = classifyAssetCategory(inst.assetType)
+            if (category == AssetCategory.CASH || category == AssetCategory.INDEX) return@mapNotNull null
+            val rawSym = inst.symbol?.trim().orEmpty()
+            val parsedRoot = if (category == AssetCategory.OPTION && rawSym.isNotBlank()) {
+                occSymbolFormatter.parse(rawSym)?.root
+            } else {
+                null
+            }
+            val rawUnderlying = inst.underlyingSymbol?.trim()?.takeIf { it.isNotBlank() }
+                ?: parsedRoot
+                ?: rawSym
+            rawUnderlying.takeIf { it.isNotBlank() }?.let(SchwabSymbolNormalizer::toDisplaySymbol)
+        }.distinct()
+
+    private suspend fun resolveOlsBetas(
+        underlyings: List<String>,
+        today: LocalDate
+    ): Map<String, BetaEstimate> {
+        val candidates = underlyings
+            .map(SchwabSymbolNormalizer::toDisplaySymbol)
+            .filter { it.isNotBlank() && it != "SPY" }
+            .distinct()
+        if (candidates.isEmpty()) return emptyMap()
+
+        val resolved = LinkedHashMap<String, BetaEstimate>(candidates.size)
+        val missing = mutableListOf<String>()
+        candidates.forEach { sym ->
+            val cacheKey = "$sym|$today"
+            val cached = dailyBetaCache[cacheKey]
+            if (cached != null) {
+                resolved[sym] = cached
+            } else {
+                missing += sym
+            }
+        }
+        if (missing.isEmpty()) return resolved
+
+        val spyCandles = fetchDailyCandlesSafe("SPY", today)
+        if (spyCandles.isEmpty()) return resolved
+
+        missing.forEach { sym ->
+            val symCandles = fetchDailyCandlesSafe(sym, today)
+            val estimate = betaWeightingCalculator.computeRollingOlsBetaFromCandles(
+                symbolCandles = symCandles,
+                spyCandles = spyCandles,
+                applyBlumeShrinkage = true
+            )
+            if (estimate != null) {
+                val cacheKey = "$sym|$today"
+                dailyBetaCache.keys
+                    .filter { it.startsWith("$sym|") && it != cacheKey }
+                    .forEach { dailyBetaCache.remove(it) }
+                dailyBetaCache[cacheKey] = estimate
+                resolved[sym] = estimate
+            }
+        }
+        return resolved
+    }
+
+    private suspend fun fetchDailyCandlesSafe(symbol: String, tradingDate: LocalDate): List<ChartCandle> =
+        runCatching {
+            marketDataRepository.getDailyClosesForTradingDate(symbol, tradingDate).getOrNull()
+        }.getOrNull().orEmpty()
+
+    private fun resolveBetaEstimate(
+        category: AssetCategory,
+        displayUnderlying: String,
+        olsBetas: Map<String, BetaEstimate>,
+        fundamentalBeta: Double?
+    ): BetaEstimate {
+        if (category == AssetCategory.CASH || category == AssetCategory.INDEX) {
+            return BetaEstimate(beta = 0.0, source = BetaSource.FUNDAMENTAL)
+        }
+        olsBetas[displayUnderlying]?.let { return it }
+        val fund = fundamentalBeta?.takeIf { it.isFinite() }
+        if (fund != null) {
+            return BetaEstimate(beta = fund, source = BetaSource.FUNDAMENTAL)
+        }
+        return BetaEstimate(beta = 1.0, source = BetaSource.FALLBACK_1_0)
+    }
+
     private fun buildLiveSnapshot(
         accountHash: String,
         account: SecuritiesAccountDto,
-        quotes: Map<String, QuoteEntryDto>
+        quotes: Map<String, QuoteEntryDto>,
+        olsBetas: Map<String, BetaEstimate> = emptyMap()
     ): PortfolioSnapshot {
         val nowMs = nowProvider()
         val today = Instant.ofEpochMilli(nowMs).atZone(NY_ZONE).toLocalDate()
         val spySpot = resolveSpot(quotes["SPY"], fallback = DEFAULT_SPY_SPOT)
 
         val positions = account.positions.mapNotNull { dto ->
-            mapLivePositionDto(dto, quotes, today)
+            mapLivePositionDto(dto, quotes, today, olsBetas)
         }
 
         val balances = account.currentBalances
@@ -371,7 +485,8 @@ class PortfolioRepositoryImpl(
     private fun mapLivePositionDto(
         dto: PositionDto,
         quotes: Map<String, QuoteEntryDto>,
-        today: LocalDate
+        today: LocalDate,
+        olsBetas: Map<String, BetaEstimate> = emptyMap()
     ): Position? {
         val instrument = dto.instrument ?: return null
         val rawSymbol = instrument.symbol?.trim()?.takeIf { it.isNotBlank() } ?: return null
@@ -398,7 +513,12 @@ class PortfolioRepositoryImpl(
             ?: if (!isOption) symbolQuote else null
 
         val underlyingSpot = resolveSpot(underlyingQuote, fallback = symbolQuote?.quote?.underlyingPrice ?: 0.0)
-        val tickerBeta = underlyingQuote?.fundamental?.beta ?: 1.0
+        val betaEstimate = resolveBetaEstimate(
+            category = category,
+            displayUnderlying = displayUnderlying,
+            olsBetas = olsBetas,
+            fundamentalBeta = underlyingQuote?.fundamental?.beta
+        )
         val divYield = SchwabQuoteNormalizer.percentToDecimal(
             underlyingQuote?.fundamental?.divYield ?: underlyingQuote?.fundamental?.dividendYield
         ) ?: 0.0
@@ -445,7 +565,8 @@ class PortfolioRepositoryImpl(
                 gamma = 0.0,
                 theta = 0.0,
                 vega = 0.0,
-                betaToSpy = if (isCashOrIndex) 0.0 else tickerBeta,
+                betaToSpy = betaEstimate.beta,
+                betaSource = betaEstimate.source,
                 underlyingSpot = normalizedPerShareMark.takeIf { it > 0.0 } ?: underlyingSpot,
                 divDate = divDate,
                 divAmount = divAmount,
@@ -538,7 +659,8 @@ class PortfolioRepositoryImpl(
             gamma = effectiveGamma,
             theta = effectiveTheta,
             vega = effectiveVega,
-            betaToSpy = tickerBeta,
+            betaToSpy = betaEstimate.beta,
+            betaSource = betaEstimate.source,
             isCall = isCall,
             strike = strike,
             expirationDate = expirationStr,
@@ -557,7 +679,8 @@ class PortfolioRepositoryImpl(
     private fun buildShadowSnapshot(
         entities: List<ShadowPositionEntity>,
         cashBalance: Double,
-        quotes: Map<String, QuoteEntryDto>
+        quotes: Map<String, QuoteEntryDto>,
+        olsBetas: Map<String, BetaEstimate> = emptyMap()
     ): PortfolioSnapshot {
         val nowMs = nowProvider()
         val today = Instant.ofEpochMilli(nowMs).atZone(NY_ZONE).toLocalDate()
@@ -566,7 +689,7 @@ class PortfolioRepositoryImpl(
         val spySpot = resolveSpot(mergedQuotes["SPY"], fallback = DEFAULT_SPY_SPOT)
 
         val positions = entities.map { entity ->
-            mapShadowPositionEntity(entity, mergedQuotes, today)
+            mapShadowPositionEntity(entity, mergedQuotes, today, olsBetas)
         }
 
         val positionsValue = positions.fold(BigDecimal.ZERO) { acc, p -> acc + p.marketValue }
@@ -614,7 +737,8 @@ class PortfolioRepositoryImpl(
     private fun mapShadowPositionEntity(
         entity: ShadowPositionEntity,
         quotes: Map<String, QuoteEntryDto>,
-        today: LocalDate
+        today: LocalDate,
+        olsBetas: Map<String, BetaEstimate> = emptyMap()
     ): Position {
         val qty = entity.quantity.toDoubleOrNull() ?: 0.0
         val avg = entity.averageCost.toDoubleOrNull() ?: 0.0
@@ -625,13 +749,20 @@ class PortfolioRepositoryImpl(
         val multiplier = if (isOption) OPTION_MULTIPLIER else 1.0
 
         val parsedOcc = if (isOption) occSymbolFormatter.parse(entity.symbol) else null
-        val underlyingSymbol = entity.underlyingSymbol.ifBlank { parsedOcc?.root ?: entity.symbol }
+        val underlyingSymbol = SchwabSymbolNormalizer.toDisplaySymbol(
+            entity.underlyingSymbol.ifBlank { parsedOcc?.root ?: entity.symbol }
+        )
         val symbolQuote = quotes[entity.symbol]
         val underlyingQuote = quotes[underlyingSymbol] ?: if (!isOption) symbolQuote else null
 
         val perShareMark = symbolQuote?.quote?.mark ?: symbolQuote?.quote?.lastPrice ?: storedMark
         val underlyingSpot = resolveSpot(underlyingQuote, fallback = if (!isOption) perShareMark else 0.0)
-        val tickerBeta = underlyingQuote?.fundamental?.beta ?: 1.0
+        val betaEstimate = resolveBetaEstimate(
+            category = category,
+            displayUnderlying = underlyingSymbol,
+            olsBetas = olsBetas,
+            fundamentalBeta = underlyingQuote?.fundamental?.beta
+        )
         val divYield = SchwabQuoteNormalizer.percentToDecimal(
             underlyingQuote?.fundamental?.divYield ?: underlyingQuote?.fundamental?.dividendYield
         ) ?: 0.0
@@ -660,7 +791,8 @@ class PortfolioRepositoryImpl(
                 gamma = 0.0,
                 theta = 0.0,
                 vega = 0.0,
-                betaToSpy = if (isCashOrIndex) 0.0 else tickerBeta,
+                betaToSpy = betaEstimate.beta,
+                betaSource = betaEstimate.source,
                 underlyingSpot = perShareMark,
                 divDate = divDate,
                 divAmount = divAmount,
@@ -719,7 +851,8 @@ class PortfolioRepositoryImpl(
             gamma = gamma,
             theta = theta,
             vega = vega,
-            betaToSpy = tickerBeta,
+            betaToSpy = betaEstimate.beta,
+            betaSource = betaEstimate.source,
             isCall = isCall,
             strike = strike,
             expirationDate = parsedOcc?.expiration?.toString(),
@@ -774,7 +907,7 @@ class PortfolioRepositoryImpl(
             portfolioAnomalies += PortfolioAnomaly(
                 type = PortfolioAnomalyType.CASH_BUFFER_BELOW_12_PCT,
                 symbol = null,
-                message = "Cash buffer ${String.format("%.1f", cashBufferPct)}% < 12% target reserve"
+                message = "Cash buffer ${String.format(java.util.Locale.US, "%.1f", cashBufferPct)}% < 12% target reserve"
             )
         }
 
@@ -804,12 +937,29 @@ class PortfolioRepositoryImpl(
 
                 val isCashOrIndexOnlyGroup = legs.isNotEmpty() &&
                     legs.all { it.category == AssetCategory.CASH || it.category == AssetCategory.INDEX }
+                val activeLeg = legs.firstOrNull {
+                    it.category == AssetCategory.EQUITY || it.category == AssetCategory.OPTION
+                } ?: legs.firstOrNull()
+                val groupBeta = activeLeg?.betaToSpy ?: 1.0
+                val groupBetaSource = activeLeg?.betaSource ?: BetaSource.FUNDAMENTAL
+
                 val groupAnomalies = mutableListOf<PortfolioAnomaly>()
                 if (!isCashOrIndexOnlyGroup && weightPct > 25.0) {
                     groupAnomalies += PortfolioAnomaly(
                         type = PortfolioAnomalyType.CONCENTRATION_OVER_25_PCT,
                         symbol = underlying,
-                        message = ">25% WT (${String.format("%.1f", weightPct)}%)"
+                        message = ">25% WT (${String.format(java.util.Locale.US, "%.1f", weightPct)}%)"
+                    )
+                }
+                if (!isCashOrIndexOnlyGroup && legs.any {
+                        (it.category == AssetCategory.EQUITY || it.category == AssetCategory.OPTION) &&
+                            it.betaSource == BetaSource.FALLBACK_1_0
+                    }
+                ) {
+                    groupAnomalies += PortfolioAnomaly(
+                        type = PortfolioAnomalyType.BETA_FALLBACK,
+                        symbol = underlying,
+                        message = "β=1.0 FALLBACK (no 252d OLS/fundamental beta)"
                     )
                 }
                 legs.forEach { leg ->
@@ -823,7 +973,7 @@ class PortfolioRepositoryImpl(
                         groupAnomalies += PortfolioAnomaly(
                             type = PortfolioAnomalyType.LEAPS_LOW_DELTA,
                             symbol = leg.symbol,
-                            message = "LEAPS < 0.65Δ (${String.format("%.2f", absDelta)})"
+                            message = "LEAPS < 0.65Δ (${String.format(java.util.Locale.US, "%.2f", absDelta)})"
                         )
                     }
                 }
@@ -832,7 +982,8 @@ class PortfolioRepositoryImpl(
                 UnderlyingPositionGroup(
                     underlyingSymbol = underlying,
                     underlyingSpot = legs.firstOrNull { (it.underlyingSpot ?: 0.0) > 0.0 }?.underlyingSpot ?: 0.0,
-                    betaToSpy = legs.firstOrNull()?.betaToSpy ?: 1.0,
+                    betaToSpy = groupBeta,
+                    betaSource = groupBetaSource,
                     totalMarketValue = groupMv,
                     weightPercent = weightPct,
                     combinedOpenPnl = groupOpenPnl,
@@ -844,6 +995,38 @@ class PortfolioRepositoryImpl(
                 )
             }
             .sortedByDescending { abs(it.totalMarketValue.toDouble()) }
+
+        val stressSummary = if (positions.isNotEmpty()) {
+            stressCalculator.computeStressSummary(
+                positions = positions,
+                accountNetLiq = netLiq.toDouble(),
+                spySpot = spySpot,
+                spyBetaDelta = spyBetaDelta,
+                includeVolSkewShock = true,
+                ivMode = StressIvMode.TERM_STRUCTURE_SQRT
+            )
+        } else {
+            null
+        }
+
+        if (stressSummary != null) {
+            if (stressSummary.isNegativeSkew) {
+                val skewVal = stressSummary.payoffSkew15 ?: 0.0
+                portfolioAnomalies += PortfolioAnomaly(
+                    type = PortfolioAnomalyType.NEGATIVE_SKEW,
+                    symbol = null,
+                    message = "Negative Payoff Skew (${String.format(java.util.Locale.US, "%.2f", skewVal)}x > 2.0x)"
+                )
+            }
+            if (stressSummary.isUpsideCapped) {
+                val capPct = (stressSummary.upsideCapture5 ?: 0.0) * 100.0
+                portfolioAnomalies += PortfolioAnomaly(
+                    type = PortfolioAnomalyType.UPSIDE_CAPPED,
+                    symbol = null,
+                    message = "Upside Capped (${String.format(java.util.Locale.US, "%.0f", capPct)}% < 50% @ +5%)"
+                )
+            }
+        }
 
         val summary = AccountSummary(
             accountHash = accountHash,
@@ -876,6 +1059,7 @@ class PortfolioRepositoryImpl(
             ),
             spySpot = spySpot,
             portfolioAnomalies = portfolioAnomalies,
+            stressSummary = stressSummary,
             isDemoSeeded = isDemoSeeded
         )
     }

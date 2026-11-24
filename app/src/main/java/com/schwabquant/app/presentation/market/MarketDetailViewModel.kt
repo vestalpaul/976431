@@ -17,6 +17,7 @@ import com.schwabquant.app.core.quant.OptionsChainBoardBuilder
 import com.schwabquant.app.core.quant.ParsedOptionChain
 import com.schwabquant.app.core.quant.ParsedOptionContract
 import com.schwabquant.app.core.quant.SelectedChainLeg
+import com.schwabquant.app.core.quant.ChartTimeframeMapper
 import com.schwabquant.app.core.quant.SpreadDraftAssembler
 import com.schwabquant.app.core.quant.StrikeWindowFilter
 import com.schwabquant.app.core.quant.VolRankCalculator
@@ -182,6 +183,7 @@ class MarketDetailViewModel @Inject constructor(
     private var optimizerJob: Job? = null
     private var quotePollJob: Job? = null
     private var isScreenVisible = false
+    internal var nowEpochMsProvider: () -> Long = System::currentTimeMillis
 
     init {
         observeRuntimeOverlays()
@@ -199,6 +201,9 @@ class MarketDetailViewModel @Inject constructor(
         if (clean == _state.value.symbol) return
         _state.value = _state.value.copy(
             symbol = clean,
+            spotPrice = 0.0,
+            dayChangeDollar = null,
+            dayChangePct = null,
             previewStrategyLabel = null,
             previewStrategyLines = emptyList(),
             selectedSpreadLegs = emptyList(),
@@ -517,12 +522,14 @@ class MarketDetailViewModel @Inject constructor(
                     val last = dto?.quote?.lastPrice ?: dto?.quote?.mark
                     val netChg = dto?.quote?.netChange
                     val pctChg = dto?.quote?.netPercentChange
+                    val tickMs = dto?.quote?.tradeTime ?: dto?.quote?.quoteTime ?: nowEpochMsProvider()
                     if (last != null && last > 0.0) {
                         applyLivePriceTick(
                             price = last,
                             dayChangeDollar = netChg,
                             dayChangePct = pctChg,
-                            volumeDelta = null
+                            volumeDelta = null,
+                            tickEpochSeconds = tickMs / 1000L
                         )
                     }
                 }
@@ -533,17 +540,21 @@ class MarketDetailViewModel @Inject constructor(
     private fun observeStreamerQuotes() {
         viewModelScope.launch {
             streamerClient.equityQuotes.collect { quote ->
-                if (quote.symbol == _state.value.symbol) {
+                if (SchwabSymbolNormalizer.toDisplaySymbol(quote.symbol) == _state.value.symbol) {
                     val px = quote.lastPrice ?: quote.markPrice
                         ?: if (quote.bidPrice != null && quote.askPrice != null) {
                             (quote.bidPrice + quote.askPrice) * 0.5
                         } else null
+                    val tickMs = quote.tradeTimeMs ?: quote.quoteTimeMs
+                        ?: quote.receivedAtEpochMs.takeIf { it > 0L }
+                        ?: nowEpochMsProvider()
                     if (px != null && px > 0.0) {
                         applyLivePriceTick(
                             price = px,
                             dayChangeDollar = null,
                             dayChangePct = null,
-                            volumeDelta = quote.lastSize
+                            volumeDelta = quote.lastSize,
+                            tickEpochSeconds = tickMs / 1000L
                         )
                     }
                 }
@@ -584,12 +595,14 @@ class MarketDetailViewModel @Inject constructor(
                 }
             }.collect { snap ->
                 latestAccountSummary = snap.accountSummary
+                val normalizedSymbol = SchwabSymbolNormalizer.toDisplaySymbol(snap.symbol)
                 val equityPos = snap.positions.firstOrNull {
-                    it.underlyingSymbol == snap.symbol && it.category == AssetCategory.EQUITY
+                    SchwabSymbolNormalizer.toDisplaySymbol(it.underlyingSymbol) == normalizedSymbol &&
+                        it.category == AssetCategory.EQUITY
                 }
                 val qtySuggestion = equityPos?.quantity?.toDouble()?.let { kotlin.math.abs(it).toInt() }
                     ?.takeIf { it > 0 } ?: 10
-                val lines = buildBasePriceLines(snap.symbol, snap.positions, snap.rules, snap.workingOrders)
+                val lines = buildBasePriceLines(snap.symbol, snap.mode, snap.positions, snap.rules, snap.workingOrders)
                 _state.value = _state.value.copy(
                     executionMode = snap.mode,
                     baseOverlayPriceLines = lines,
@@ -613,13 +626,17 @@ class MarketDetailViewModel @Inject constructor(
 
     private fun buildBasePriceLines(
         symbol: String,
+        executionMode: ExecutionMode,
         positions: List<Position>,
         rules: List<SentinelRule>,
         orders: List<WorkingOrder>
     ): List<JsPriceLine> {
+        val normalizedTarget = SchwabSymbolNormalizer.toDisplaySymbol(symbol)
         val out = mutableListOf<JsPriceLine>()
         positions.firstOrNull {
-            it.underlyingSymbol == symbol && it.category == AssetCategory.EQUITY && it.averageCost > BigDecimal.ZERO
+            SchwabSymbolNormalizer.toDisplaySymbol(it.underlyingSymbol) == normalizedTarget &&
+                it.category == AssetCategory.EQUITY &&
+                it.averageCost > BigDecimal.ZERO
         }?.let { eq ->
             out.add(
                 JsPriceLine(
@@ -631,7 +648,10 @@ class MarketDetailViewModel @Inject constructor(
                 )
             )
         }
-        rules.filter { it.symbol == symbol }.forEach { rule ->
+        rules.filter {
+            it.executionMode == executionMode &&
+                SchwabSymbolNormalizer.toDisplaySymbol(it.symbol) == normalizedTarget
+        }.forEach { rule ->
             val color = when (rule.ruleType) {
                 SentinelRuleType.LONG_STOP_LOSS,
                 SentinelRuleType.SHORT_STOP_LOSS -> "#FF5252"
@@ -649,7 +669,10 @@ class MarketDetailViewModel @Inject constructor(
                 )
             )
         }
-        orders.filter { it.underlyingSymbol == symbol }.forEach { order ->
+        orders.filter {
+            it.executionMode == executionMode &&
+                SchwabSymbolNormalizer.toDisplaySymbol(it.underlyingSymbol) == normalizedTarget
+        }.forEach { order ->
             order.limitPrice?.toDoubleOrNull()?.takeIf { it > 0.0 }?.let { lmt ->
                 out.add(
                     JsPriceLine(
@@ -714,9 +737,18 @@ class MarketDetailViewModel @Inject constructor(
                 )
             }
             val latestClose = candles.lastOrNull()?.close ?: _state.value.spotPrice
-            val prevClose = if (candles.size >= 2) candles[candles.size - 2].close else null
-            val chgDollar = if (prevClose != null && prevClose > 0.0) latestClose - prevClose else null
-            val chgPct = if (prevClose != null && prevClose > 0.0 && chgDollar != null) (chgDollar / prevClose) * 100.0 else null
+            var liveSpotFromQuote: Double? = null
+            var liveDayDollar: Double? = _state.value.dayChangeDollar
+            var liveDayPct: Double? = _state.value.dayChangePct
+            if (canUseLive && liveDayDollar == null) {
+                val quotesMap = marketDataRepository.getQuotes(listOf(symbol), forceRefresh = forceRefresh).getOrNull()
+                val quoteDto = quotesMap?.get(symbol)
+                    ?: quotesMap?.get(SchwabSymbolNormalizer.toApiSymbol(symbol))
+                    ?: quotesMap?.values?.firstOrNull()
+                liveSpotFromQuote = (quoteDto?.quote?.lastPrice ?: quoteDto?.quote?.mark)?.takeIf { it > 0.0 }
+                liveDayDollar = quoteDto?.quote?.netChange
+                liveDayPct = quoteDto?.quote?.netPercentChange
+            }
 
             _state.value = _state.value.copy(
                 isLoadingChart = false,
@@ -725,9 +757,13 @@ class MarketDetailViewModel @Inject constructor(
                 indicators = indicators,
                 chartResetCounter = _state.value.chartResetCounter + 1,
                 latestLiveBar = null,
-                spotPrice = if (_state.value.spotPrice <= 0.0) latestClose else _state.value.spotPrice,
-                dayChangeDollar = _state.value.dayChangeDollar ?: chgDollar,
-                dayChangePct = _state.value.dayChangePct ?: chgPct
+                spotPrice = when {
+                    _state.value.spotPrice > 0.0 -> _state.value.spotPrice
+                    liveSpotFromQuote != null -> liveSpotFromQuote
+                    else -> latestClose
+                },
+                dayChangeDollar = if (canUseLive) liveDayDollar else null,
+                dayChangePct = if (canUseLive) liveDayPct else null
             )
         }
     }
@@ -800,8 +836,8 @@ class MarketDetailViewModel @Inject constructor(
                 isLoadingChain = false,
                 isLiveMarketData = !isDemo,
                 spotPrice = parsedChain.underlyingPrice.takeIf { it > 0.0 } ?: _state.value.spotPrice,
-                dayChangeDollar = dayDollar ?: _state.value.dayChangeDollar,
-                dayChangePct = dayPct ?: _state.value.dayChangePct,
+                dayChangeDollar = if (canUseLive) (dayDollar ?: _state.value.dayChangeDollar) else null,
+                dayChangePct = if (canUseLive) (dayPct ?: _state.value.dayChangePct) else null,
                 volRank52w = volRankValue,
                 sma50 = sma50Value,
                 chainBoard = board,
@@ -864,32 +900,58 @@ class MarketDetailViewModel @Inject constructor(
         price: Double,
         dayChangeDollar: Double?,
         dayChangePct: Double?,
-        volumeDelta: Long?
+        volumeDelta: Long?,
+        tickEpochSeconds: Long = nowEpochMsProvider() / 1000L
     ) {
         val cur = _state.value
         val lastBar = cur.candles.lastOrNull()
-        val updatedBar = if (lastBar != null) {
-            val newBar = lastBar.copy(
-                high = maxOf(lastBar.high, price),
-                low = minOf(lastBar.low, price),
-                close = price,
-                volume = lastBar.volume + (volumeDelta?.coerceAtLeast(0L) ?: 0L)
+        val deltaVol = volumeDelta?.coerceAtLeast(0L) ?: 0L
+        var nextCandles = cur.candles
+        var updatedBar: ChartCandle? = null
+
+        if (lastBar != null) {
+            val lastBucket = ChartTimeframeMapper.alignEpochSecondsToBucket(
+                epochSeconds = lastBar.epochSeconds,
+                timeframe = cur.timeframe
             )
-            newBar
-        } else {
-            null
+            val tickBucket = ChartTimeframeMapper.alignEpochSecondsToBucket(
+                epochSeconds = tickEpochSeconds,
+                timeframe = cur.timeframe
+            )
+            when {
+                tickBucket < lastBucket -> return
+                tickBucket == lastBucket -> {
+                    val bar = lastBar.copy(
+                        high = maxOf(lastBar.high, price),
+                        low = minOf(lastBar.low, price),
+                        close = price,
+                        volume = lastBar.volume + deltaVol
+                    )
+                    updatedBar = bar
+                    nextCandles = cur.candles.dropLast(1) + bar
+                }
+                else -> {
+                    val barEpoch = maxOf(tickBucket, lastBar.epochSeconds + 1L)
+                    val bar = ChartCandle(
+                        epochSeconds = barEpoch,
+                        open = price,
+                        high = price,
+                        low = price,
+                        close = price,
+                        volume = deltaVol
+                    )
+                    updatedBar = bar
+                    nextCandles = cur.candles + bar
+                }
+            }
         }
-        val nextCandles = if (updatedBar != null && cur.candles.isNotEmpty()) {
-            cur.candles.dropLast(1) + updatedBar
-        } else {
-            cur.candles
-        }
+
         _state.value = cur.copy(
             spotPrice = price,
             dayChangeDollar = dayChangeDollar ?: cur.dayChangeDollar,
             dayChangePct = dayChangePct ?: cur.dayChangePct,
             candles = nextCandles,
-            latestLiveBar = updatedBar
+            latestLiveBar = updatedBar ?: cur.latestLiveBar
         )
     }
 

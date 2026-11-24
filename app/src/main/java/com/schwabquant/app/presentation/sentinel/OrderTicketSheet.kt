@@ -7,8 +7,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -32,6 +36,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import com.schwabquant.app.domain.model.AssetCategory
@@ -67,6 +72,8 @@ fun OrderTicketSheet(
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 16.dp),
             contentPadding = PaddingValues(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -213,23 +220,33 @@ fun OrderTicketSheet(
                         border = BorderStroke(1.dp, colors.borderSubtle),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Text(
                                 text = "Bid ${state.quoteBid?.let { "$${fmt2(it)}" } ?: "--"} | " +
                                     "Mid ${state.quoteMid?.let { "$${fmt2(it)}" } ?: "--"} | " +
                                     "Ask ${state.quoteAsk?.let { "$${fmt2(it)}" } ?: "--"}",
-                                style = SchwabQuantTheme.numericTypography.tableCell
-                            )
-                            Text(
-                                text = "Est. BPR ${state.estimatedBpr?.let { "$${fmt0(it)}" } ?: "--"}",
                                 style = SchwabQuantTheme.numericTypography.tableCell,
-                                fontWeight = FontWeight.SemiBold
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                Text(
+                                    text = "Est. BPR ${state.estimatedBpr?.let { "$${fmt0(it)}" } ?: "--"}",
+                                    style = SchwabQuantTheme.numericTypography.tableCell,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                     }
                 }

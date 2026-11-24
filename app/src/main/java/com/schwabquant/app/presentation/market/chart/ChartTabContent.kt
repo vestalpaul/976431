@@ -54,8 +54,6 @@ fun ChartTabContent(
     val themePayload = remember(themeType) { ChartThemeMapper.fromAppTheme(themeType) }
     val chartDataPayload = remember(
         state.chartResetCounter,
-        state.candles.size,
-        state.candles.lastOrNull()?.epochSeconds,
         state.overlayToggles,
         themePayload
     ) {

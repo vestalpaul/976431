@@ -1,5 +1,6 @@
 package com.schwabquant.app.domain.usecase
 
+import com.schwabquant.app.core.quant.StressMatrixSummary
 import com.schwabquant.app.core.quant.StressScenarioResult
 import com.schwabquant.app.domain.model.AssetCategory
 import com.schwabquant.app.domain.model.BearChecklistEvaluation
@@ -10,6 +11,8 @@ import com.schwabquant.app.domain.model.OrderLeg
 import com.schwabquant.app.domain.model.OrderSide
 import com.schwabquant.app.domain.model.OrderStrategyCategory
 import com.schwabquant.app.domain.model.OrderType
+import com.schwabquant.app.domain.model.PmccValidationReport
+import com.schwabquant.app.domain.model.PortfolioAnomalyType
 import com.schwabquant.app.domain.model.PortfolioSnapshot
 import com.schwabquant.app.domain.model.Position
 import com.schwabquant.app.domain.model.TickerSectorMap
@@ -342,7 +345,9 @@ class GeneratePortfolioAdviceUseCase @Inject constructor() {
         stressMatrix: List<StressScenarioResult> = emptyList(),
         washSaleFlags: List<WashSaleFlag> = emptyList(),
         exDivAlerts: List<ExDivRadarAlert> = emptyList(),
-        regime: BearChecklistEvaluation? = null
+        regime: BearChecklistEvaluation? = null,
+        stressSummary: StressMatrixSummary? = snapshot?.stressSummary,
+        pmccReport: PmccValidationReport? = null
     ): String {
         if (snapshot == null) {
             return """
@@ -354,6 +359,7 @@ class GeneratePortfolioAdviceUseCase @Inject constructor() {
 
         val summary = snapshot.accountSummary
         val greeks = snapshot.aggregatedGreeks
+        val activeStressRows = stressSummary?.scenarios?.takeIf { it.isNotEmpty() } ?: stressMatrix
 
         return buildString {
             appendLine("# Schwab Quant Portfolio Context")
@@ -380,12 +386,30 @@ class GeneratePortfolioAdviceUseCase @Inject constructor() {
             appendLine("- **Net Gamma:** ${fmt4(greeks.netGamma)}")
             appendLine("- **Net Vega (1% IV):** $${fmt2(greeks.netVegaPer1Pct)}")
 
-            if (stressMatrix.isNotEmpty()) {
+            val betaFallbacks = snapshot.portfolioAnomalies.filter { it.type == PortfolioAnomalyType.BETA_FALLBACK }
+            if (betaFallbacks.isNotEmpty()) {
+                val tickers = betaFallbacks.mapNotNull { it.symbol }.distinct().joinToString(", ")
+                appendLine("- **⚠️ BETA FALLBACK (1.0):** Missing 252d OLS & fundamental beta on: $tickers")
+            }
+
+            if (activeStressRows.isNotEmpty()) {
                 appendLine()
-                appendLine("## Stress Matrix (SPY Shocks)")
+                val ivModeLabel = stressSummary?.ivMode?.label ?: "Term √(30/DTE)"
+                appendLine("## Stress Matrix (SPY Shocks — $ivModeLabel)")
+                if (stressSummary != null) {
+                    val skewText = stressSummary.payoffSkew15?.let { "${fmt2(it)}x" } ?: "N/A"
+                    val captureText = stressSummary.upsideCapture5?.let { "${fmt0(it * 100.0)}%" } ?: "N/A"
+                    appendLine("- **Payoff Skew (-15%/+15%):** $skewText | **Upside Capture (+5%):** $captureText")
+                    if (stressSummary.isNegativeSkew) {
+                        appendLine("- **⚠️ NEGATIVE_SKEW:** Downside -15% loss exceeds 2.0x +15% upside.")
+                    }
+                    if (stressSummary.isUpsideCapped) {
+                        appendLine("- **⚠️ UPSIDE_CAPPED:** +5% rally captures < 50% of linear β-delta upside.")
+                    }
+                }
                 appendLine("| SPY Shock | IV Shift | Projected P&L | Portfolio % |")
                 appendLine("|---:|---:|---:|---:|")
-                stressMatrix.forEach { row ->
+                activeStressRows.forEach { row ->
                     val sign = if (row.spyShockPercent > 0) "+" else ""
                     val ivPct = row.ivShockAbsolute * 100.0
                     val ivSign = if (ivPct > 0) "+" else ""
@@ -396,13 +420,30 @@ class GeneratePortfolioAdviceUseCase @Inject constructor() {
                 }
             }
 
+            if (pmccReport != null && (pmccReport.pairs.isNotEmpty() || pmccReport.findings.isNotEmpty())) {
+                appendLine()
+                appendLine("## PMCC Structure Health (${if (pmccReport.passed) "PASSED" else "WARNINGS/VIOLATIONS"})")
+                pmccReport.pairs.forEach { pair ->
+                    val statusTag = if (pair.passed) "OK" else "FLAG"
+                    appendLine(
+                        "- **$statusTag ${pair.underlying} ${pair.contracts}x** (+K$${fmt2(pair.longLeg.strike)}/-K$${fmt2(pair.shortLeg.strike)}): " +
+                            "Width $${fmt2(pair.strikeWidth)} | Basis $${fmt2(pair.netDebitBasis)} [${pair.basisMode.name}] | " +
+                            "Buf(Basis) $${fmt2(pair.widthBufferBasis)} | Buf(Mark) $${fmt2(pair.widthBufferMark)} | Net Δ ${fmt2(pair.netDelta)}"
+                    )
+                }
+                pmccReport.findings.forEach { f ->
+                    val supTag = f.supersededBy?.let { " (superseded by $it)" } ?: ""
+                    appendLine("- **[${f.severity.name}] ${f.code}** (${f.pairLabel ?: f.underlying})$supTag: ${f.message}")
+                }
+            }
+
             if (snapshot.groups.isNotEmpty()) {
                 appendLine()
                 appendLine("## Grouped Positions (${snapshot.groups.size} Underlyings)")
                 snapshot.groups.forEach { group ->
                     val anomalyTags = group.anomalies.joinToString(", ") { it.message }
                     appendLine(
-                        "### ${group.underlyingSymbol} ($${fmt2(group.underlyingSpot)}, β=${fmt2(group.betaToSpy)}) — " +
+                        "### ${group.underlyingSymbol} ($${fmt2(group.underlyingSpot)}, β=${fmt2(group.betaToSpy)} [${group.betaSource.badge}]) — " +
                             "${fmt1(group.weightPercent)}% wt | Open P&L $${group.combinedOpenPnl} | " +
                             "Δ=${fmt2(group.groupNetDelta)} | Θ=$${fmt2(group.groupNetTheta)}" +
                             if (anomalyTags.isNotBlank()) " | ⚠️ $anomalyTags" else ""

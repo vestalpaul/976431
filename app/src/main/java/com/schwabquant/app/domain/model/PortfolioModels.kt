@@ -1,5 +1,7 @@
 package com.schwabquant.app.domain.model
 
+import com.schwabquant.app.core.quant.BetaSource
+import com.schwabquant.app.core.quant.StressMatrixSummary
 import java.math.BigDecimal
 
 /**
@@ -26,7 +28,10 @@ enum class AssetCategory {
 enum class PortfolioAnomalyType {
     LEAPS_LOW_DELTA,
     CONCENTRATION_OVER_25_PCT,
-    CASH_BUFFER_BELOW_12_PCT
+    CASH_BUFFER_BELOW_12_PCT,
+    BETA_FALLBACK,
+    NEGATIVE_SKEW,
+    UPSIDE_CAPPED
 }
 
 data class PortfolioAnomaly(
@@ -76,6 +81,7 @@ data class Position(
     val theta: Double? = null,
     val vega: Double? = null,
     val betaToSpy: Double? = null,
+    val betaSource: BetaSource = BetaSource.FUNDAMENTAL,
     val isCall: Boolean? = null,
     val strike: Double? = null,
     val expirationDate: String? = null,
@@ -101,7 +107,8 @@ data class UnderlyingPositionGroup(
     val groupNetDelta: Double,
     val groupNetTheta: Double,
     val legs: List<Position>,
-    val anomalies: List<PortfolioAnomaly> = emptyList()
+    val anomalies: List<PortfolioAnomaly> = emptyList(),
+    val betaSource: BetaSource = BetaSource.FUNDAMENTAL
 )
 
 data class PortfolioSnapshot(
@@ -112,5 +119,6 @@ data class PortfolioSnapshot(
     val aggregatedGreeks: AggregatedGreeks,
     val spySpot: Double,
     val portfolioAnomalies: List<PortfolioAnomaly> = emptyList(),
+    val stressSummary: StressMatrixSummary? = null,
     val isDemoSeeded: Boolean = false
 )

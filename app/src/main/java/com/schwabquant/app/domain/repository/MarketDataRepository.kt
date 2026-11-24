@@ -8,6 +8,7 @@ import com.schwabquant.app.data.remote.dto.QuoteEntryDto
 import com.schwabquant.app.domain.model.AssetCategory
 import com.schwabquant.app.domain.model.Watchlist
 import kotlinx.coroutines.flow.Flow
+import java.time.LocalDate
 
 interface MarketDataRepository {
     fun observeWatchlistSymbols(): Flow<List<String>>
@@ -51,4 +52,10 @@ interface MarketDataRepository {
         frequency: Int = 1,
         forceRefresh: Boolean = false
     ): Result<PriceHistoryResponseDto>
+
+    suspend fun getDailyClosesForTradingDate(
+        symbol: String,
+        tradingDate: LocalDate,
+        forceRefresh: Boolean = false
+    ): Result<List<ChartCandle>> = getChartCandles(symbol, ChartTimeframe.D1, forceRefresh)
 }

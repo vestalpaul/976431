@@ -10,6 +10,7 @@ enum class RiskRuleCode(val title: String) {
     PMCC_UPSIDE_LOSS_RISK("PMCC Upside Expiration Loss Risk"),
     PMCP_WEAK_STRUCTURE("PMCP Debit > 85% of Strike Width"),
     INVERTED_DIAGONAL("Inverted Diagonal Strikes"),
+    PMCC_ROLL_STRUCTURE_RISK("PMCC Roll / Diagonal Structure Risk"),
     MARGIN_BORROW_WARNING("Reg-T Margin Borrow Warning"),
     CONCENTRATION_BREACH("Ticker / Sector Concentration Breach"),
     LOW_CASH_RESERVE("Settled Cash Reserve < 12%"),

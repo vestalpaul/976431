@@ -69,94 +69,97 @@ fun StrategyOptimizerTabContent(
 ) {
     var methodologyExpanded by rememberSaveable { mutableStateOf(false) }
 
-    Column(modifier = modifier.fillMaxSize()) {
-        // 1. Top Control Strip (Risk Profile + Capital Cap + Context + All-7 Gemini Handoff)
-        Surface(
-            color = SchwabQuantTheme.colors.surfaceElevated,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+    val report = state.optimizationReport
+    Box(modifier = modifier.fillMaxSize()) {
+        if (state.isComputingOptimizer && report == null) {
+            CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    OptimizerRiskProfile.entries.forEach { profile ->
-                        FilterChip(
-                            selected = state.riskProfile == profile,
-                            onClick = { onSelectRiskProfile(profile) },
-                            label = { Text(profile.label) }
-                        )
+                item(key = "optimizer_controls") {
+                    Surface(
+                        color = SchwabQuantTheme.colors.surfaceElevated,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, SchwabQuantTheme.colors.borderSubtle),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(OptimizerRiskProfile.entries, key = { it.name }) { profile ->
+                                    FilterChip(
+                                        selected = state.riskProfile == profile,
+                                        onClick = { onSelectRiskProfile(profile) },
+                                        label = { Text(profile.label, maxLines = 1, softWrap = false) }
+                                    )
+                                }
+                            }
+
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(OptimizerCapitalPreset.entries, key = { it.name }) { preset ->
+                                    FilterChip(
+                                        selected = state.capitalPreset == preset,
+                                        onClick = { onSelectCapitalPreset(preset) },
+                                        label = { Text(preset.label, maxLines = 1, softWrap = false) }
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    val vrText = state.volRank52w?.let { "VR ${fmt0(it)}%" } ?: "VR N/A"
+                                    val smaText = state.sma50?.let { "50DMA $${fmt2(it)}" } ?: "50DMA N/A"
+                                    Text(
+                                        text = "${state.activeRegime.label} • $vrText • $smaText",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        text = if (state.resolvedCapitalBudget != null) {
+                                            "Capital Cap: $${fmt0(state.resolvedCapitalBudget)}"
+                                        } else {
+                                            "Capital Cap: Unlimited"
+                                        },
+                                        style = SchwabQuantTheme.numericTypography.badgeMono,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                                DeepAnalysisButton(
+                                    label = "Deep Analysis (All 7)",
+                                    onClick = onDeepAnalysisAllSeven
+                                )
+                            }
+                        }
                     }
                 }
 
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(OptimizerCapitalPreset.entries, key = { it.name }) { preset ->
-                        FilterChip(
-                            selected = state.capitalPreset == preset,
-                            onClick = { onSelectCapitalPreset(preset) },
-                            label = { Text(preset.label) }
-                        )
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        val vrText = state.volRank52w?.let { "VR ${fmt0(it)}%" } ?: "VR N/A"
-                        val smaText = state.sma50?.let { "50DMA $${fmt2(it)}" } ?: "50DMA N/A"
-                        Text(
-                            text = "${state.activeRegime.label} • $vrText • $smaText",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = if (state.resolvedCapitalBudget != null) {
-                                "Capital Cap: $${fmt0(state.resolvedCapitalBudget)}"
-                            } else {
-                                "Capital Cap: Unlimited"
-                            },
-                            style = SchwabQuantTheme.numericTypography.badgeMono,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    DeepAnalysisButton(
-                        label = "Deep Analysis (All 7)",
-                        onClick = onDeepAnalysisAllSeven
+                item(key = "methodology_banner") {
+                    MethodologyBanner(
+                        expanded = methodologyExpanded,
+                        onToggle = { methodologyExpanded = !methodologyExpanded }
                     )
                 }
-            }
-        }
 
-        HorizontalDivider(color = SchwabQuantTheme.colors.borderSubtle)
-
-        // 2. Methodology Banner + All 7 Ranked Strategy Cards
-        val report = state.optimizationReport
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            if (state.isComputingOptimizer && report == null) {
-                CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-            } else if (report == null) {
-                Text(
-                    text = "Option chain loading...",
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    item(key = "methodology_banner") {
-                        MethodologyBanner(
-                            expanded = methodologyExpanded,
-                            onToggle = { methodologyExpanded = !methodologyExpanded }
+                if (report == null) {
+                    item(key = "loading_chain_hint") {
+                        Text(
+                            text = "Option chain loading...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(16.dp)
                         )
                     }
+                } else {
                     items(
                         items = report.rankedStrategies,
                         key = { it.strategyType.name }
@@ -441,7 +444,7 @@ private fun PillarBreakdownRow(breakdown: StrategyRankingBreakdown) {
         PillarBar(label = "Δ/DTE", value = breakdown.deltaDteScore, max = 30.0, modifier = Modifier.weight(1f))
         PillarBar(label = "Struct", value = breakdown.structuralEdgeScore, max = 35.0, modifier = Modifier.weight(1f))
         PillarBar(label = "Liq", value = breakdown.liquidityScore, max = 20.0, modifier = Modifier.weight(1f))
-        PillarBar(label = "Reg/Cap", value = breakdown.regimeCapitalScore, max = 15.0, modifier = Modifier.weight(1f))
+        PillarBar(label = "Regime", value = breakdown.regimeCapitalScore, max = 15.0, modifier = Modifier.weight(1f))
     }
 }
 
@@ -454,10 +457,18 @@ private fun PillarBar(
 ) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
-            text = "$label ${fmt1(value)}/${max.toInt()}",
-            style = SchwabQuantTheme.numericTypography.badgeMono,
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1
+            maxLines = 1,
+            softWrap = false
+        )
+        Text(
+            text = "${fmt1(value)}/${max.toInt()}",
+            style = SchwabQuantTheme.numericTypography.badgeMono,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            softWrap = false
         )
         LinearProgressIndicator(
             progress = { (value / max).toFloat().coerceIn(0f, 1f) },
