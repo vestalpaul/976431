@@ -1,3 +1,4 @@
+import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -9,6 +10,23 @@ plugins {
     alias(libs.plugins.kotlin.serialization) apply false
     alias(libs.plugins.ksp) apply false
     alias(libs.plugins.hilt.android) apply false
+}
+
+val localPropsFile = rootProject.file("local.properties")
+val localProps = Properties().apply {
+    if (localPropsFile.exists()) {
+        localPropsFile.reader(Charsets.UTF_8).use { load(it) }
+    }
+}
+val localBuildRootPath = localProps.getProperty("localBuildDir")?.trim()?.takeIf { it.isNotEmpty() }
+    ?: System.getenv("SCHWABQUANT_LOCAL_BUILD_DIR")?.trim()?.takeIf { it.isNotEmpty() }
+
+if (localBuildRootPath != null) {
+    val localBuildRoot = File(localBuildRootPath)
+    layout.buildDirectory.set(File(localBuildRoot, "root"))
+    subprojects {
+        layout.buildDirectory.set(File(localBuildRoot, name))
+    }
 }
 
 abstract class BumpVersionTask : DefaultTask() {

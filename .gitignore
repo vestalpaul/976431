@@ -5,6 +5,7 @@ build/
 **/build/
 app/build/
 app/release/
+releases/
 captures/
 .cxx/
 *.apk

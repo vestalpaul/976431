@@ -1,5 +1,6 @@
 package com.schwabquant.app.presentation.market
 
+import android.content.Context
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -437,10 +438,15 @@ class MarketDetailViewModel @Inject constructor(
         stagedOrderHolder.stageBlankOrder(symbol = cur.symbol, spotPrice = spot)
     }
 
+    internal var sentinelServiceStarter: (Context?) -> Boolean = { ctx ->
+        ctx != null && com.schwabquant.app.service.SentinelForegroundService.startSafely(ctx).isSuccess
+    }
+
     fun addQuickSentinelRule(
         ruleType: SentinelRuleType,
         triggerPriceText: String,
-        quantityText: String
+        quantityText: String,
+        context: Context? = null
     ) {
         val triggerPrice = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(triggerPriceText)
         val quantity = quantityText.trim().toIntOrNull()?.takeIf { it > 0 }
@@ -464,8 +470,22 @@ class MarketDetailViewModel @Inject constructor(
                 createdAtEpochMs = System.currentTimeMillis(),
                 updatedAtEpochMs = System.currentTimeMillis()
             )
-            sentinelRepository.upsertRule(rule)
-            postMessage("Armed ${ruleType.shortTag} on $symbol @ \$${triggerPrice.toPlainString()} (${activeMode.name}).")
+            val id = sentinelRepository.upsertRule(rule)
+            sentinelRepository.recordAuditEvent(
+                category = "SENTINEL_RULE_ARMED",
+                severity = "INFO",
+                symbol = symbol,
+                executionMode = activeMode.name,
+                message = "Quick-armed #${id} ${ruleType.displayName} on $symbol x$quantity @ \$${triggerPrice.toPlainString()} (${activeMode.name})."
+            )
+            val started = sentinelServiceStarter(context)
+            if (started) {
+                postMessage("Armed ${ruleType.shortTag} on $symbol @ \$${triggerPrice.toPlainString()} (${activeMode.name}) & started Sentinel.")
+            } else {
+                postMessage(
+                    "Rule saved as ARMED, but Sentinel foreground service could not start automatically. Open the Sentinel tab to start monitoring."
+                )
+            }
         }
     }
 

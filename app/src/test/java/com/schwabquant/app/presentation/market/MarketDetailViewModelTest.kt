@@ -222,6 +222,56 @@ class MarketDetailViewModelTest {
         assertEquals(-0.59, liveHarness.viewModel.uiState.value.dayChangePct)
     }
 
+    @Test
+    fun `V1-9-1 HIGH-1 addQuickSentinelRule records SENTINEL_RULE_ARMED and warns if service launch blocked`() = runTest {
+        val harness = createHarness(authStatus = OAuthStatus.NOT_CONFIGURED)
+        awaitInitialLoad(harness.viewModel)
+
+        var starterCalls = 0
+        var starterResult = true
+        harness.viewModel.sentinelServiceStarter = {
+            starterCalls++
+            starterResult
+        }
+
+        val ctx = mockk<android.content.Context>(relaxed = true)
+        harness.viewModel.addQuickSentinelRule(
+            ruleType = com.schwabquant.app.domain.model.SentinelRuleType.LONG_STOP_LOSS,
+            triggerPriceText = "540.00",
+            quantityText = "10",
+            context = ctx
+        )
+        testScheduler.runCurrent()
+
+        assertEquals(1, starterCalls)
+        io.mockk.coVerify(exactly = 1) { harness.sentinelRepository.upsertRule(any()) }
+        io.mockk.coVerify(exactly = 1) {
+            harness.sentinelRepository.recordAuditEvent(
+                category = "SENTINEL_RULE_ARMED",
+                severity = "INFO",
+                symbol = "SPY",
+                executionMode = any(),
+                message = any()
+            )
+        }
+        assertEquals(true, harness.viewModel.uiState.value.snackbarMessage?.contains("started Sentinel"))
+
+        // When FGS start is blocked on Android 14+, surface explicit manual monitoring warning
+        starterResult = false
+        harness.viewModel.consumeSnackbar()
+        harness.viewModel.addQuickSentinelRule(
+            ruleType = com.schwabquant.app.domain.model.SentinelRuleType.TAKE_PROFIT,
+            triggerPriceText = "565.00",
+            quantityText = "10",
+            context = ctx
+        )
+        testScheduler.runCurrent()
+
+        assertEquals(2, starterCalls)
+        val blockedMsg = harness.viewModel.uiState.value.snackbarMessage.orEmpty()
+        assertTrue(blockedMsg.contains("Open the Sentinel tab", ignoreCase = true))
+    }
+
     private suspend fun awaitInitialLoad(viewModel: MarketDetailViewModel) {
         withContext(Dispatchers.Default) {
             withTimeout(5_000) {
@@ -234,7 +284,8 @@ class MarketDetailViewModelTest {
 
     private data class Harness(
         val viewModel: MarketDetailViewModel,
-        val equityQuotesFlow: MutableSharedFlow<LiveEquityQuote>
+        val equityQuotesFlow: MutableSharedFlow<LiveEquityQuote>,
+        val sentinelRepository: SentinelRepository
     )
 
     private fun createHarness(
@@ -262,6 +313,7 @@ class MarketDetailViewModelTest {
         }
         val sentinelRepository = mockk<SentinelRepository>(relaxed = true) {
             every { observeActiveRules() } returns MutableStateFlow(emptyList())
+            coEvery { upsertRule(any()) } returns 42L
         }
         val authRepository = mockk<AuthRepository>(relaxed = true) {
             every { observeAuthState() } returns MutableStateFlow(AuthSessionState(status = authStatus))
@@ -293,6 +345,10 @@ class MarketDetailViewModelTest {
             preferences = preferences
         )
         createdViewModels += viewModel
-        return Harness(viewModel = viewModel, equityQuotesFlow = equityQuotesFlow)
+        return Harness(
+            viewModel = viewModel,
+            equityQuotesFlow = equityQuotesFlow,
+            sentinelRepository = sentinelRepository
+        )
     }
 }

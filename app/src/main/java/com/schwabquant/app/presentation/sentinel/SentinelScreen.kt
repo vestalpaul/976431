@@ -479,6 +479,7 @@ private fun SentinelRuleCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Switch(
                         checked = rule.status == SentinelRuleStatus.ARMED,
+                        enabled = !isModeMismatch && rule.status != SentinelRuleStatus.EXECUTING,
                         onCheckedChange = { onToggleArmed() }
                     )
                     IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {

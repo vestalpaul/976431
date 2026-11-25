@@ -246,13 +246,24 @@ class OrderTicketViewModel @Inject constructor(
         val cleanSym = current.underlyingSymbol.trim().uppercase().ifEmpty { "GOOG" }
         val updatedOrderType = when (category) {
             OrderStrategyCategory.DIAGONAL,
-            OrderStrategyCategory.CALENDAR -> OrderType.NET_DEBIT
-            OrderStrategyCategory.IRON_CONDOR -> OrderType.NET_CREDIT
-            OrderStrategyCategory.VERTICAL -> if (current.orderType == OrderType.NET_DEBIT) OrderType.NET_DEBIT else OrderType.NET_CREDIT
+            OrderStrategyCategory.CALENDAR ->
+                if (current.orderType == OrderType.NET_CREDIT || current.orderType == OrderType.NET_DEBIT) {
+                    current.orderType
+                } else {
+                    OrderType.NET_DEBIT
+                }
+            OrderStrategyCategory.VERTICAL,
+            OrderStrategyCategory.IRON_CONDOR ->
+                if (current.orderType == OrderType.NET_CREDIT || current.orderType == OrderType.NET_DEBIT) {
+                    current.orderType
+                } else {
+                    OrderType.NET_CREDIT
+                }
             OrderStrategyCategory.SINGLE_EQUITY,
             OrderStrategyCategory.SINGLE_OPTION,
             OrderStrategyCategory.OCO_BRACKET -> OrderType.LIMIT
         }
+        val parsedLimitForLeg = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(current.limitPriceInput)
         val updatedSession = if (category == OrderStrategyCategory.SINGLE_EQUITY) {
             current.session
         } else {
@@ -292,7 +303,7 @@ class OrderTicketViewModel @Inject constructor(
                         side = equitySide,
                         quantity = qty,
                         underlyingSymbol = cleanSym,
-                        estimatedUnitPrice = current.limitPriceInput.toBigDecimalOrNull()
+                        estimatedUnitPrice = parsedLimitForLeg
                     )
                 )
             }
@@ -314,7 +325,7 @@ class OrderTicketViewModel @Inject constructor(
                             side = mappedOptSide,
                             quantity = qty,
                             underlyingSymbol = cleanSym,
-                            estimatedUnitPrice = current.limitPriceInput.toBigDecimalOrNull()
+                            estimatedUnitPrice = parsedLimitForLeg
                         )
                     )
                 }
@@ -340,7 +351,7 @@ class OrderTicketViewModel @Inject constructor(
         val nextBpr = if (domainChanged) null else current.estimatedBpr
 
         val refPx = nextMid
-            ?: current.limitPriceInput.toDoubleOrNull()
+            ?: parsedLimitForLeg?.toDouble()
             ?: nextBid
             ?: nextAsk
         val derivedOcoTp = if (category == OrderStrategyCategory.OCO_BRACKET && current.ocoTakeProfitInput.isBlank() && refPx != null && refPx > 0.0) {
@@ -353,6 +364,9 @@ class OrderTicketViewModel @Inject constructor(
         } else {
             current.ocoStopPriceInput
         }
+        val nextLimitInput = if (category == OrderStrategyCategory.OCO_BRACKET) "" else current.limitPriceInput
+        val nextOcoTp = if (category == OrderStrategyCategory.OCO_BRACKET) derivedOcoTp else ""
+        val nextOcoSl = if (category == OrderStrategyCategory.OCO_BRACKET) derivedOcoSl else ""
         val walkUpAllowed = isWalkUpAllowed(category, updatedOrderType, null)
         invalidateReviewedDraft()
 
@@ -361,8 +375,10 @@ class OrderTicketViewModel @Inject constructor(
             orderType = updatedOrderType,
             session = updatedSession,
             duration = updatedDuration,
-            ocoTakeProfitInput = derivedOcoTp,
-            ocoStopPriceInput = derivedOcoSl,
+            limitPriceInput = nextLimitInput,
+            stopPriceInput = "",
+            ocoTakeProfitInput = nextOcoTp,
+            ocoStopPriceInput = nextOcoSl,
             legs = updatedLegs,
             quoteBid = nextBid,
             quoteMid = nextMid,
@@ -466,12 +482,29 @@ class OrderTicketViewModel @Inject constructor(
         } else {
             s.duration
         }
+        val nextLimitInput = when (orderType) {
+            OrderType.MARKET,
+            OrderType.STOP -> ""
+            OrderType.LIMIT,
+            OrderType.NET_DEBIT,
+            OrderType.NET_CREDIT,
+            OrderType.STOP_LIMIT -> s.limitPriceInput
+        }
+        val nextStopInput = when (orderType) {
+            OrderType.STOP,
+            OrderType.STOP_LIMIT -> s.stopPriceInput
+            else -> ""
+        }
         val walkUpAllowed = isWalkUpAllowed(s.strategyCategory, orderType, s.replacePriorOrderId)
         invalidateReviewedDraft()
         editState.value = s.copy(
             orderType = orderType,
             session = validSession,
             duration = validDuration,
+            limitPriceInput = nextLimitInput,
+            stopPriceInput = nextStopInput,
+            ocoTakeProfitInput = "",
+            ocoStopPriceInput = "",
             walkUpEnabled = if (walkUpAllowed) s.walkUpEnabled else false,
             pendingRiskAssessment = null,
             readyForBiometricSwipe = false
@@ -1032,18 +1065,58 @@ class OrderTicketViewModel @Inject constructor(
                 )
             )
         }
-        val limitBd = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(s.limitPriceInput)
-            ?: s.limitPriceInput.toBigDecimalOrNull()?.setScale(2, RoundingMode.HALF_UP)
-        val stopBd = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(s.stopPriceInput)
-            ?: s.stopPriceInput.toBigDecimalOrNull()?.setScale(2, RoundingMode.HALF_UP)
-        val ocoTpBd = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(s.ocoTakeProfitInput)
-            ?: s.ocoTakeProfitInput.toBigDecimalOrNull()?.setScale(2, RoundingMode.HALF_UP)
-        val ocoSlBd = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(s.ocoStopPriceInput)
-            ?: s.ocoStopPriceInput.toBigDecimalOrNull()?.setScale(2, RoundingMode.HALF_UP)
+        val parsedLimit = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(s.limitPriceInput)
+            ?.setScale(2, RoundingMode.HALF_UP)
+        val parsedStop = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(s.stopPriceInput)
+            ?.setScale(2, RoundingMode.HALF_UP)
+        val parsedOcoTp = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(s.ocoTakeProfitInput)
+            ?.setScale(2, RoundingMode.HALF_UP)
+        val parsedOcoSl = DeepLinkIntentSanitizer.parseStrictPositiveDecimal(s.ocoStopPriceInput)
+            ?.setScale(2, RoundingMode.HALF_UP)
+
+        val limitBd: BigDecimal?
+        val stopBd: BigDecimal?
+        val ocoTpBd: BigDecimal?
+        val ocoSlBd: BigDecimal?
+
+        if (s.strategyCategory == OrderStrategyCategory.OCO_BRACKET) {
+            limitBd = null
+            stopBd = null
+            ocoTpBd = parsedOcoTp
+            ocoSlBd = parsedOcoSl
+        } else {
+            ocoTpBd = null
+            ocoSlBd = null
+            when (s.orderType) {
+                OrderType.MARKET -> {
+                    limitBd = null
+                    stopBd = null
+                }
+                OrderType.LIMIT,
+                OrderType.NET_DEBIT,
+                OrderType.NET_CREDIT -> {
+                    limitBd = parsedLimit
+                    stopBd = null
+                }
+                OrderType.STOP -> {
+                    limitBd = null
+                    stopBd = parsedStop
+                }
+                OrderType.STOP_LIMIT -> {
+                    limitBd = parsedLimit
+                    stopBd = parsedStop
+                }
+            }
+        }
 
         val computedBpr = when {
-            s.strategyCategory == OrderStrategyCategory.SINGLE_EQUITY && limitBd != null ->
-                limitBd.toDouble() * qty
+            s.strategyCategory == OrderStrategyCategory.SINGLE_EQUITY -> {
+                val px = limitBd?.toDouble()
+                    ?: stopBd?.toDouble()
+                    ?: s.quoteMid?.takeIf { it > 0.0 }
+                px?.times(qty)
+            }
+            s.strategyCategory == OrderStrategyCategory.OCO_BRACKET -> s.estimatedBpr
             else -> s.estimatedBpr ?: limitBd?.toDouble()?.times(100.0 * qty)
         }
 

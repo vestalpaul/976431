@@ -284,9 +284,9 @@ fun OrderTicketSheet(
                             }
                             OrderStrategyCategory.SINGLE_OPTION -> listOf(OrderType.LIMIT, OrderType.MARKET)
                             OrderStrategyCategory.DIAGONAL,
-                            OrderStrategyCategory.CALENDAR -> listOf(OrderType.NET_DEBIT)
-                            OrderStrategyCategory.VERTICAL -> listOf(OrderType.NET_CREDIT, OrderType.NET_DEBIT)
-                            OrderStrategyCategory.IRON_CONDOR -> listOf(OrderType.NET_CREDIT)
+                            OrderStrategyCategory.CALENDAR -> listOf(OrderType.NET_DEBIT, OrderType.NET_CREDIT)
+                            OrderStrategyCategory.VERTICAL,
+                            OrderStrategyCategory.IRON_CONDOR -> listOf(OrderType.NET_CREDIT, OrderType.NET_DEBIT)
                             OrderStrategyCategory.OCO_BRACKET -> emptyList()
                         }
 

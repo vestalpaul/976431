@@ -455,4 +455,50 @@ class SchwabOrderPayloadBuilderTest {
         assertEquals("OCO", built.orderStrategyType)
         assertEquals(2, built.childOrderStrategies?.size)
     }
+
+    @Test
+    fun `V1-9-1 MEDIUM-2 builds NET_CREDIT DIAGONAL, NET_CREDIT CALENDAR, and NET_DEBIT IRON_CONDOR payloads`() {
+        val creditDiag = OrderTicket(
+            accountHash = "hash",
+            executionMode = ExecutionMode.LIVE,
+            orderType = OrderType.NET_CREDIT,
+            session = TradingSession.NORMAL,
+            duration = OrderDuration.DAY,
+            strategyType = "SINGLE",
+            complexStrategyType = "DIAGONAL",
+            limitPrice = BigDecimal("2.45"),
+            legs = listOf(
+                OrderLeg("IWM   280121C00240000", AssetCategory.OPTION, OrderSide.BUY_TO_OPEN, 1),
+                OrderLeg("IWM   261218C00210000", AssetCategory.OPTION, OrderSide.SELL_TO_OPEN, 1)
+            )
+        )
+        val diagJson = json.parseToJsonElement(builder.toJsonString(creditDiag)).jsonObject
+        assertEquals("NET_CREDIT", diagJson["orderType"]!!.jsonPrimitive.content)
+        assertEquals("DIAGONAL", diagJson["complexOrderStrategyType"]!!.jsonPrimitive.content)
+
+        val creditCal = creditDiag.copy(complexStrategyType = "CALENDAR")
+        val calJson = json.parseToJsonElement(builder.toJsonString(creditCal)).jsonObject
+        assertEquals("NET_CREDIT", calJson["orderType"]!!.jsonPrimitive.content)
+        assertEquals("CALENDAR", calJson["complexOrderStrategyType"]!!.jsonPrimitive.content)
+
+        val debitCondor = OrderTicket(
+            accountHash = "hash",
+            executionMode = ExecutionMode.LIVE,
+            orderType = OrderType.NET_DEBIT,
+            session = TradingSession.NORMAL,
+            duration = OrderDuration.DAY,
+            strategyType = "SINGLE",
+            complexStrategyType = "IRON_CONDOR",
+            limitPrice = BigDecimal("1.85"),
+            legs = listOf(
+                OrderLeg("IWM   261218P00205000", AssetCategory.OPTION, OrderSide.BUY_TO_OPEN, 1),
+                OrderLeg("IWM   261218P00210000", AssetCategory.OPTION, OrderSide.SELL_TO_OPEN, 1),
+                OrderLeg("IWM   261218C00235000", AssetCategory.OPTION, OrderSide.SELL_TO_OPEN, 1),
+                OrderLeg("IWM   261218C00240000", AssetCategory.OPTION, OrderSide.BUY_TO_OPEN, 1)
+            )
+        )
+        val condorJson = json.parseToJsonElement(builder.toJsonString(debitCondor)).jsonObject
+        assertEquals("NET_DEBIT", condorJson["orderType"]!!.jsonPrimitive.content)
+        assertEquals("IRON_CONDOR", condorJson["complexOrderStrategyType"]!!.jsonPrimitive.content)
+    }
 }

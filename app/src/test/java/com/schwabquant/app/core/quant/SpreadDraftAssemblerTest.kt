@@ -120,6 +120,58 @@ class SpreadDraftAssemblerTest {
         )
     }
 
+    @Test
+    fun `V1-9-1 MEDIUM-2 credit diagonal, credit calendar, and debit iron condor assemble and serialize cleanly`() {
+        val expFront = LocalDate.of(2026, 12, 18)
+        val expBack = LocalDate.of(2027, 2, 19)
+
+        // 1. Credit Diagonal: sell expensive ITM front call, buy cheaper OTM back call -> NET_CREDIT
+        val shortItmCall = opt("SPY   261218C00550000", true, 550.0, expFront, 28, mid = 38.00, delta = 0.88)
+        val longOtmBackCall = opt("SPY   270219C00620000", true, 620.0, expBack, 91, mid = 5.50, delta = 0.25)
+        val creditDiag = assembler.assemble(
+            "SPY", 585.0,
+            listOf(SelectedChainLeg(longOtmBackCall, OrderSide.BUY_TO_OPEN), SelectedChainLeg(shortItmCall, OrderSide.SELL_TO_OPEN))
+        ).getOrThrow()
+        assertEquals(OrderStrategyCategory.DIAGONAL, creditDiag.strategyCategory)
+        assertEquals(OrderType.NET_CREDIT, creditDiag.orderType)
+        val diagReq = payloadBuilder.build(creditDiag.draft.toOrderTicket("", ExecutionMode.LIVE))
+        assertEquals("NET_CREDIT", diagReq.orderType)
+        assertEquals("DIAGONAL", diagReq.complexOrderStrategyType)
+
+        // 2. Credit Calendar: sell higher-mid leg, buy lower-mid leg at same strike -> NET_CREDIT
+        val shortFrontCal = opt("SPY   261218C00585000", true, 585.0, expFront, 28, mid = 7.40, delta = 0.50)
+        val longBackCal = opt("SPY   270219C00585000", true, 585.0, expBack, 91, mid = 5.20, delta = 0.52)
+        val creditCal = assembler.assemble(
+            "SPY", 585.0,
+            listOf(SelectedChainLeg(longBackCal, OrderSide.BUY_TO_OPEN), SelectedChainLeg(shortFrontCal, OrderSide.SELL_TO_OPEN))
+        ).getOrThrow()
+        assertEquals(OrderStrategyCategory.CALENDAR, creditCal.strategyCategory)
+        assertEquals(OrderType.NET_CREDIT, creditCal.orderType)
+        val calReq = payloadBuilder.build(creditCal.draft.toOrderTicket("", ExecutionMode.LIVE))
+        assertEquals("NET_CREDIT", calReq.orderType)
+        assertEquals("CALENDAR", calReq.complexOrderStrategyType)
+
+        // 3. Debit Iron Condor (long wings priced above short inner strikes -> NET_DEBIT)
+        val buyPutWing = opt("SPY   261218P00560000", false, 560.0, expFront, 28, mid = 4.50, delta = -0.25)
+        val sellPutInner = opt("SPY   261218P00570000", false, 570.0, expFront, 28, mid = 1.60, delta = -0.14)
+        val sellCallInner = opt("SPY   261218C00595000", true, 595.0, expFront, 28, mid = 1.40, delta = 0.14)
+        val buyCallWing = opt("SPY   261218C00605000", true, 605.0, expFront, 28, mid = 3.80, delta = 0.25)
+        val debitCondor = assembler.assemble(
+            "SPY", 585.0,
+            listOf(
+                SelectedChainLeg(buyPutWing, OrderSide.BUY_TO_OPEN),
+                SelectedChainLeg(sellPutInner, OrderSide.SELL_TO_OPEN),
+                SelectedChainLeg(sellCallInner, OrderSide.SELL_TO_OPEN),
+                SelectedChainLeg(buyCallWing, OrderSide.BUY_TO_OPEN)
+            )
+        ).getOrThrow()
+        assertEquals(OrderStrategyCategory.IRON_CONDOR, debitCondor.strategyCategory)
+        assertEquals(OrderType.NET_DEBIT, debitCondor.orderType)
+        val condorReq = payloadBuilder.build(debitCondor.draft.toOrderTicket("", ExecutionMode.LIVE))
+        assertEquals("NET_DEBIT", condorReq.orderType)
+        assertEquals("IRON_CONDOR", condorReq.complexOrderStrategyType)
+    }
+
     private fun opt(
         occ: String,
         isCall: Boolean,

@@ -186,3 +186,40 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
 }
+
+val defaultAppBuildDir = layout.projectDirectory.dir("build").asFile.toPath().normalize()
+val activeAppBuildDir = layout.buildDirectory.get().asFile.toPath().normalize()
+if (activeAppBuildDir != defaultAppBuildDir) {
+    val syncDebugApkToWorkspace = tasks.register<Copy>("syncDebugApkToWorkspace") {
+        group = "distribution"
+        description = "Copies built Debug APK and metadata to workspace releases/debug after assembleDebug succeeds."
+        onlyIf {
+            val assemble = project.tasks.findByName("assembleDebug")
+            assemble != null && assemble.state.executed && assemble.state.failure == null
+        }
+        from(layout.buildDirectory.dir("outputs/apk/debug")) {
+            include("SchwabQuant-V$computedVersionName*.apk", "output-metadata.json")
+        }
+        into(rootProject.layout.projectDirectory.dir("releases/debug"))
+    }
+
+    val syncReleaseApkToWorkspace = tasks.register<Copy>("syncReleaseApkToWorkspace") {
+        group = "distribution"
+        description = "Copies built Release APK and metadata to workspace releases/release after assembleRelease succeeds."
+        onlyIf {
+            val assemble = project.tasks.findByName("assembleRelease")
+            assemble != null && assemble.state.executed && assemble.state.failure == null
+        }
+        from(layout.buildDirectory.dir("outputs/apk/release")) {
+            include("SchwabQuant-V$computedVersionName*.apk", "output-metadata.json")
+        }
+        into(rootProject.layout.projectDirectory.dir("releases/release"))
+    }
+
+    tasks.matching { it.name == "assembleDebug" }.configureEach {
+        finalizedBy(syncDebugApkToWorkspace)
+    }
+    tasks.matching { it.name == "assembleRelease" }.configureEach {
+        finalizedBy(syncReleaseApkToWorkspace)
+    }
+}

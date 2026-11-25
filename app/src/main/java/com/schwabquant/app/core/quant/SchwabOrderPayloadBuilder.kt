@@ -195,8 +195,8 @@ class SchwabOrderPayloadBuilder @Inject constructor(
         when (complex) {
             SchwabComplexOrderStrategyType.DIAGONAL -> {
                 require(ticket.legs.size == 2) { "DIAGONAL requires 2 option legs." }
-                require(ticket.orderType == OrderType.NET_DEBIT) {
-                    "PMCC/PMCP DIAGONAL requires NET_DEBIT orderType."
+                require(ticket.orderType == OrderType.NET_DEBIT || ticket.orderType == OrderType.NET_CREDIT) {
+                    "DIAGONAL requires NET_DEBIT or NET_CREDIT orderType."
                 }
             }
             SchwabComplexOrderStrategyType.VERTICAL -> {
@@ -207,14 +207,14 @@ class SchwabOrderPayloadBuilder @Inject constructor(
             }
             SchwabComplexOrderStrategyType.CALENDAR -> {
                 require(ticket.legs.size == 2) { "CALENDAR requires 2 option legs." }
-                require(ticket.orderType == OrderType.NET_DEBIT) {
-                    "CALENDAR requires NET_DEBIT."
+                require(ticket.orderType == OrderType.NET_DEBIT || ticket.orderType == OrderType.NET_CREDIT) {
+                    "CALENDAR requires NET_DEBIT or NET_CREDIT."
                 }
             }
             SchwabComplexOrderStrategyType.IRON_CONDOR -> {
                 require(ticket.legs.size == 4) { "IRON_CONDOR requires 4 option legs." }
-                require(ticket.orderType == OrderType.NET_CREDIT) {
-                    "IRON_CONDOR requires NET_CREDIT."
+                require(ticket.orderType == OrderType.NET_CREDIT || ticket.orderType == OrderType.NET_DEBIT) {
+                    "IRON_CONDOR requires NET_CREDIT or NET_DEBIT."
                 }
             }
             else -> error("Unsupported complexOrderStrategyType: '$complex'.")

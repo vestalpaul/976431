@@ -5,12 +5,21 @@ import com.schwabquant.app.core.security.CredentialVault
 import com.schwabquant.app.data.local.dao.WashSaleDao
 import com.schwabquant.app.data.local.entity.WashSaleTradeEntity
 import com.schwabquant.app.data.remote.api.SchwabTraderApi
+import com.schwabquant.app.data.remote.dto.ExecutionLegDto
+import com.schwabquant.app.data.remote.dto.OrderActivityDto
+import com.schwabquant.app.data.remote.dto.OrderInstrumentDto
+import com.schwabquant.app.data.remote.dto.OrderLegResponseDto
+import com.schwabquant.app.data.remote.dto.OrderResponseDto
+import io.mockk.coEvery
+import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
@@ -144,6 +153,124 @@ class TrackWashSalesUseCaseTest {
         assertEquals(0, BigDecimal("200.00").compareTo(flag.disallowedLossAmount))
         assertEquals(0, BigDecimal("300.00").compareTo(flag.allowedLossAmount))
         assertEquals(0, BigDecimal("10440.00").compareTo(flag.adjustedReplacementBasis))
+    }
+
+    @Test
+    fun `V1-9-1 MEDIUM-1 syncs +0000 offset timestamps, per-legId prices, and nested OCO child fills`() = runTest {
+        val inserted = mutableListOf<WashSaleTradeEntity>()
+        val washDao = mockk<WashSaleDao>(relaxed = true) {
+            coEvery { countByExternalOrderId(any()) } returns 0
+            coEvery { insert(capture(inserted)) } returns 1L
+        }
+        val traderApi = mockk<SchwabTraderApi>(relaxed = true)
+        val vault = mockk<CredentialVault>(relaxed = true) {
+            every { getPrimaryAccountHash() } returns "HASH_SYNC"
+        }
+
+        // Order 1: +0000 offset timestamp & multi-leg distinct per-legId prices
+        val multiLegOrder = OrderResponseDto(
+            orderId = 9001L,
+            status = "FILLED",
+            closeTime = "2026-10-15T14:30:00+0000",
+            enteredTime = "2026-10-15T14:00:00+0000",
+            price = 61.30,
+            orderLegCollection = listOf(
+                OrderLegResponseDto(
+                    instruction = "BUY_TO_OPEN",
+                    quantity = 1.0,
+                    instrument = OrderInstrumentDto("SPY   270917C00540000", "OPTION", "SPY"),
+                    legId = 1
+                ),
+                OrderLegResponseDto(
+                    instruction = "SELL_TO_OPEN",
+                    quantity = 1.0,
+                    instrument = OrderInstrumentDto("SPY   261218C00590000", "OPTION", "SPY"),
+                    legId = 2
+                )
+            ),
+            orderActivityCollection = listOf(
+                OrderActivityDto(
+                    activityType = "EXECUTION",
+                    executionLegs = listOf(
+                        ExecutionLegDto(
+                            legId = 1,
+                            quantity = 1.0,
+                            price = 64.50,
+                            time = "2026-10-15T14:30:00+0000"
+                        ),
+                        ExecutionLegDto(
+                            legId = 2,
+                            quantity = 1.0,
+                            price = 3.20,
+                            time = "2026-10-15T14:30:00+0000"
+                        )
+                    )
+                )
+            )
+        )
+
+        // Order 2: Parent OCO wrapper containing FILLED child STOP loss order
+        val parentOcoOrder = OrderResponseDto(
+            orderId = 9002L,
+            orderStrategyType = "OCO",
+            status = "WORKING",
+            childOrderStrategies = listOf(
+                OrderResponseDto(
+                    orderId = 9003L,
+                    orderType = "LIMIT",
+                    status = "CANCELED",
+                    orderLegCollection = listOf(
+                        OrderLegResponseDto("SELL", 10.0, OrderInstrumentDto("GOOG", "EQUITY"))
+                    )
+                ),
+                OrderResponseDto(
+                    orderId = 9004L,
+                    orderType = "STOP",
+                    status = "FILLED",
+                    closeTime = "2026-10-16T15:45:00+0000",
+                    orderLegCollection = listOf(
+                        OrderLegResponseDto("SELL", 10.0, OrderInstrumentDto("GOOG", "EQUITY"), legId = 1)
+                    ),
+                    orderActivityCollection = listOf(
+                        OrderActivityDto(
+                            activityType = "EXECUTION",
+                            executionLegs = listOf(
+                                ExecutionLegDto(legId = 1, quantity = 10.0, price = 252.40, time = "2026-10-16T15:45:00+0000")
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+        coEvery { traderApi.getOrders(any(), any(), any()) } returns listOf(multiLegOrder, parentOcoOrder) andThen emptyList()
+
+        val syncUseCase = TrackWashSalesUseCase(
+            washSaleDao = washDao,
+            traderApi = traderApi,
+            credentialVault = vault,
+            occSymbolFormatter = OccSymbolFormatter()
+        )
+        val count = syncUseCase.syncFilledOrdersFromSchwab(
+            accountHash = "HASH_SYNC",
+            nowInstant = Instant.parse("2026-11-24T12:00:00Z")
+        ).getOrThrow()
+
+        assertEquals(3, count)
+        assertEquals(3, inserted.size)
+
+        val expectedOct15Ms = Instant.parse("2026-10-15T14:30:00Z").toEpochMilli()
+        val leg1 = inserted.first { it.symbol == "SPY   270917C00540000" }
+        val leg2 = inserted.first { it.symbol == "SPY   261218C00590000" }
+        assertEquals(expectedOct15Ms, leg1.tradeTimestampEpochMs)
+        assertEquals(expectedOct15Ms, leg2.tradeTimestampEpochMs)
+        assertEquals(64.50, leg1.price, 1e-6)
+        assertEquals(3.20, leg2.price, 1e-6)
+
+        val ocoStopLot = inserted.first { it.symbol == "GOOG" }
+        assertEquals(Instant.parse("2026-10-16T15:45:00Z").toEpochMilli(), ocoStopLot.tradeTimestampEpochMs)
+        assertEquals(252.40, ocoStopLot.price, 1e-6)
+        assertEquals("SELL", ocoStopLot.instruction)
     }
 
     private fun nyEpoch(date: LocalDate): Long =

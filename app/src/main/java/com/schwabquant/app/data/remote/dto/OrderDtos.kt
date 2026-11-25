@@ -116,7 +116,8 @@ data class OrderResponseDto(
 data class OrderLegResponseDto(
     val instruction: String? = null,
     val quantity: Double? = null,
-    val instrument: OrderInstrumentDto? = null
+    val instrument: OrderInstrumentDto? = null,
+    val legId: Int? = null
 )
 
 @Serializable

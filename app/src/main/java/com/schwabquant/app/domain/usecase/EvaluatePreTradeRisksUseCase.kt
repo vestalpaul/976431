@@ -506,16 +506,18 @@ class EvaluatePreTradeRisksUseCase(
 
         if (draft.legs.size > 1) {
             if (draft.orderType == OrderType.NET_CREDIT) return 0.0
-            val px = draft.limitPrice?.toDouble() ?: draft.estimatedMid ?: 0.0
+            val px = draft.limitPrice?.toDouble()?.takeIf { it > 0.0 }
+                ?: draft.estimatedMid?.takeIf { it > 0.0 }
+                ?: 0.0
             return (px * baseQty * OPTION_MULTIPLIER).coerceAtLeast(0.0)
         }
 
         val leg = draft.legs.single()
         val mult = if (leg.category == AssetCategory.OPTION) OPTION_MULTIPLIER else 1.0
-        val unitPx = draft.limitPrice?.toDouble()
-            ?: draft.stopPrice?.toDouble()
-            ?: leg.estimatedUnitPrice?.toDouble()
-            ?: draft.estimatedMid
+        val unitPx = draft.limitPrice?.toDouble()?.takeIf { it > 0.0 }
+            ?: draft.stopPrice?.toDouble()?.takeIf { it > 0.0 }
+            ?: leg.estimatedUnitPrice?.toDouble()?.takeIf { it > 0.0 }
+            ?: draft.estimatedMid?.takeIf { it > 0.0 }
             ?: 0.0
 
         return when (leg.side) {

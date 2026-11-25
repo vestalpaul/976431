@@ -12,6 +12,7 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.Instant
 import java.time.LocalDate
+import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -118,9 +119,7 @@ class TrackWashSalesUseCase @Inject constructor(
             toEnteredTime = SCHWAB_ISO_UTC.format(nowInstant)
         )
 
-        val filledOrders = (window1 + window2)
-            .distinctBy { it.orderId }
-            .filter { it.status.equals("FILLED", ignoreCase = true) }
+        val filledOrders = collectFilledLeafOrders(window1 + window2)
 
         var insertedCount = 0
         filledOrders.forEach { order ->
@@ -134,6 +133,24 @@ class TrackWashSalesUseCase @Inject constructor(
             }
         }
         insertedCount
+    }
+
+    private fun collectFilledLeafOrders(orders: List<OrderResponseDto>): List<OrderResponseDto> {
+        val collected = mutableListOf<OrderResponseDto>()
+        val seenOrderIds = HashSet<Long>()
+
+        fun traverse(node: OrderResponseDto) {
+            if (node.status.equals("FILLED", ignoreCase = true) && node.orderLegCollection.isNotEmpty()) {
+                val oid = node.orderId
+                if (oid == null || seenOrderIds.add(oid)) {
+                    collected += node
+                }
+            }
+            node.childOrderStrategies.orEmpty().forEach(::traverse)
+        }
+
+        orders.forEach(::traverse)
+        return collected
     }
 
     fun evaluateWashSales(
@@ -314,13 +331,49 @@ class TrackWashSalesUseCase @Inject constructor(
 
     private fun mapFilledOrderToLots(order: OrderResponseDto): List<WashSaleTradeEntity> {
         val orderId = order.orderId?.toString() ?: return emptyList()
-        val executionLeg = order.orderActivityCollection
-            .flatMap { it.executionLegs }
-            .firstOrNull()
+        val allExecLegs = order.orderActivityCollection.flatMap { it.executionLegs }
 
-        val rawTimestamp = executionLeg?.time ?: order.closeTime ?: order.enteredTime
-        val timestampMs = parseSchwabTimestampMs(rawTimestamp) ?: System.currentTimeMillis()
-        val fallbackPrice = executionLeg?.price ?: order.price ?: 0.0
+        val weightedSumByLegId = HashMap<Int, Double>()
+        val qtySumByLegId = HashMap<Int, Double>()
+        val timestampByLegId = HashMap<Int, Long>()
+
+        var singleOrderWeightedSum = 0.0
+        var singleOrderQtySum = 0.0
+        var firstValidExecTimestampMs: Long? = null
+
+        allExecLegs.forEach { exec ->
+            val execTimeMs = parseSchwabTimestampMs(exec.time)
+            if (firstValidExecTimestampMs == null && execTimeMs != null) {
+                firstValidExecTimestampMs = execTimeMs
+            }
+            val px = exec.price?.takeIf { it.isFinite() && it > 0.0 }
+            val wQty = exec.quantity?.takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+            if (px != null) {
+                singleOrderWeightedSum += px * wQty
+                singleOrderQtySum += wQty
+            }
+            val lid = exec.legId
+            if (lid != null) {
+                if (px != null) {
+                    weightedSumByLegId[lid] = (weightedSumByLegId[lid] ?: 0.0) + px * wQty
+                    qtySumByLegId[lid] = (qtySumByLegId[lid] ?: 0.0) + wQty
+                }
+                if (execTimeMs != null && lid !in timestampByLegId) {
+                    timestampByLegId[lid] = execTimeMs
+                }
+            }
+        }
+
+        val orderFallbackTimestampMs = firstValidExecTimestampMs
+            ?: parseSchwabTimestampMs(order.closeTime)
+            ?: parseSchwabTimestampMs(order.enteredTime)
+            ?: System.currentTimeMillis()
+        val singleLegExecAvgPrice = if (singleOrderQtySum > 0.0) {
+            singleOrderWeightedSum / singleOrderQtySum
+        } else {
+            null
+        }
+        val isSingleLegOrder = order.orderLegCollection.size == 1
 
         return order.orderLegCollection.mapIndexedNotNull { idx, leg ->
             val inst = leg.instrument ?: return@mapIndexedNotNull null
@@ -329,6 +382,18 @@ class TrackWashSalesUseCase @Inject constructor(
             val assetType = inst.assetType?.uppercase() ?: "EQUITY"
             val qty = (leg.quantity ?: order.filledQuantity ?: order.quantity ?: 0.0).toInt()
             if (qty <= 0) return@mapIndexedNotNull null
+
+            val effectiveLegId = leg.legId ?: (idx + 1)
+            val perLegSum = weightedSumByLegId[effectiveLegId]
+            val perLegQty = qtySumByLegId[effectiveLegId] ?: 0.0
+            val legPrice = if (perLegSum != null && perLegQty > 0.0) {
+                perLegSum / perLegQty
+            } else if (isSingleLegOrder) {
+                singleLegExecAvgPrice ?: order.price ?: 0.0
+            } else {
+                0.0
+            }
+            val legTimestampMs = timestampByLegId[effectiveLegId] ?: orderFallbackTimestampMs
 
             val parsedOcc = if (assetType == "OPTION") occSymbolFormatter.parse(symbol) else null
             val underlying = inst.underlyingSymbol?.takeIf { it.isNotBlank() }
@@ -341,9 +406,9 @@ class TrackWashSalesUseCase @Inject constructor(
                 assetType = assetType,
                 instruction = instruction,
                 quantity = qty,
-                price = fallbackPrice,
+                price = legPrice,
                 realizedPnl = null,
-                tradeTimestampEpochMs = timestampMs,
+                tradeTimestampEpochMs = legTimestampMs,
                 source = "SCHWAB_SYNC",
                 externalOrderId = "${orderId}_${idx}_${symbol}"
             )
@@ -351,8 +416,12 @@ class TrackWashSalesUseCase @Inject constructor(
     }
 
     private fun parseSchwabTimestampMs(raw: String?): Long? {
-        if (raw.isNullOrBlank()) return null
-        return runCatching { Instant.parse(raw.trim()).toEpochMilli() }.getOrNull()
+        val text = raw?.trim().orEmpty()
+        if (text.isEmpty()) return null
+        return runCatching { Instant.parse(text).toEpochMilli() }.getOrNull()
+            ?: runCatching { OffsetDateTime.parse(text).toInstant().toEpochMilli() }.getOrNull()
+            ?: runCatching { OffsetDateTime.parse(text, SCHWAB_OFFSET_FORMATTER_MS).toInstant().toEpochMilli() }.getOrNull()
+            ?: runCatching { OffsetDateTime.parse(text, SCHWAB_OFFSET_FORMATTER).toInstant().toEpochMilli() }.getOrNull()
     }
 
     private fun WashSaleTradeEntity.toLot(): WashSaleLot = WashSaleLot(
@@ -395,5 +464,9 @@ class TrackWashSalesUseCase @Inject constructor(
         private val NY_ZONE: ZoneId = ZoneId.of("America/New_York")
         private val SCHWAB_ISO_UTC: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
+        private val SCHWAB_OFFSET_FORMATTER_MS: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ")
+        private val SCHWAB_OFFSET_FORMATTER: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssZ")
     }
 }

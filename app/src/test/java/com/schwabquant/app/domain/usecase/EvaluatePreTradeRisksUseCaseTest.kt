@@ -369,6 +369,37 @@ class EvaluatePreTradeRisksUseCaseTest {
         )
     }
 
+    @Test
+    fun `V1-9-1 HIGH-2 zero or negative limitPrice falls back to positive estimatedMid for outlay and cash checks`() {
+        val zeroLimitMarketDraft = OrderDraft(
+            strategyCategory = OrderStrategyCategory.SINGLE_EQUITY,
+            underlyingSymbol = "AAPL",
+            orderType = OrderType.MARKET,
+            limitPrice = BigDecimal.ZERO,
+            legs = listOf(
+                OrderLeg(
+                    symbol = "AAPL",
+                    category = AssetCategory.EQUITY,
+                    side = OrderSide.BUY,
+                    quantity = 100,
+                    estimatedUnitPrice = BigDecimal("-5.00")
+                )
+            ),
+            estimatedMid = 200.0
+        )
+        val snapshot = sampleSnapshot(
+            netLiq = 40_000.0,
+            settledCash = 10_000.0,
+            groups = emptyList()
+        )
+
+        val assessment = useCase.evaluate(zeroLimitMarketDraft, snapshot, emptyList(), today = today)
+        val codes = assessment.warnings.map { it.code }.toSet()
+        assertTrue(RiskRuleCode.MARGIN_BORROW_WARNING in codes)
+        assertTrue(RiskRuleCode.CONCENTRATION_BREACH in codes)
+        assertTrue(RiskRuleCode.LOW_CASH_RESERVE in codes)
+    }
+
     private fun group(sym: String, value: Double) = UnderlyingPositionGroup(
         underlyingSymbol = sym,
         underlyingSpot = 100.0,

@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.stateIn
@@ -262,6 +263,21 @@ class SentinelViewModel @Inject constructor(
 
     fun toggleRuleArmed(rule: SentinelRule, context: Context) {
         viewModelScope.launch {
+            val activeMode = preferences.executionMode.first()
+            if (rule.executionMode != activeMode) {
+                setFeedback(
+                    "Switch to ${rule.executionMode.name} Mode before modifying ${rule.symbol} (${rule.ruleType.shortTag}).",
+                    isError = true
+                )
+                return@launch
+            }
+            if (rule.status == SentinelRuleStatus.EXECUTING) {
+                setFeedback(
+                    "Cannot arm or pause ${rule.symbol} (${rule.ruleType.shortTag}) while execution is in flight.",
+                    isError = true
+                )
+                return@launch
+            }
             val shouldArm = rule.status != SentinelRuleStatus.ARMED
             if (shouldArm) {
                 runtimeCoordinator.clearTracker(rule.id)

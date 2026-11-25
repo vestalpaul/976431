@@ -701,6 +701,77 @@ class OrderTicketViewModelTest {
         collectJob.cancel()
     }
 
+    @Test
+    fun `V1-9-1 HIGH-2 switching zero negative or overflow limitPrice to MARKET or OCO scrubs draft and keeps risk outlay math`() = runTest {
+        val harness = createHarness(isLive = true)
+        harness.livePortfolioFlow.value = healthyLiveSnapshot()
+        every { harness.biometricGate.canAuthenticate() } returns true
+        coEvery { harness.biometricGate.authenticate(any(), any(), any()) } returns BiometricAuthResult.Succeeded
+        val capturedTicket = slot<OrderTicket>()
+        coEvery {
+            harness.orderRepository.submitOrder(
+                ticket = capture(capturedTicket),
+                risksAcknowledged = any(),
+                overriddenRiskCodes = any(),
+                simulateImmediateMidFill = any()
+            )
+        } returns Result.success(
+            OrderSubmissionResult(
+                orderId = "LIVE_OK",
+                executionMode = ExecutionMode.LIVE,
+                status = "WORKING",
+                message = "OK",
+                submittedAtEpochMs = 1_000L
+            )
+        )
+
+        val collectJob = backgroundScope.launch { harness.viewModel.uiState.collect {} }
+        val activity = mockk<FragmentActivity>(relaxed = true)
+
+        // 1. Zero limitPrice + switch to MARKET must drop limitPrice=null and still fire risk warnings from estimatedMid ($550 x 100 = $55k)
+        harness.stagedOrderHolder.stageBlankOrder(symbol = "SPY", spotPrice = 550.0)
+        harness.viewModel.selectSingleLegSide(OrderSide.BUY)
+        harness.viewModel.updateQuantity("100")
+        harness.viewModel.updateLimitPrice("0.00")
+        harness.viewModel.updateOrderType(OrderType.MARKET)
+        harness.viewModel.reviewAndSubmit()
+        testScheduler.runCurrent()
+
+        val warnings = harness.viewModel.uiState.value.pendingRiskAssessment?.warnings.orEmpty().map { it.code }.toSet()
+        assertTrue(RiskRuleCode.MARGIN_BORROW_WARNING in warnings)
+        assertTrue(RiskRuleCode.CONCENTRATION_BREACH in warnings)
+        assertTrue(RiskRuleCode.LOW_CASH_RESERVE in warnings)
+
+        harness.viewModel.acknowledgeRisksAndContinue()
+        harness.viewModel.onBiometricSwipeCompleted(activity)
+        testScheduler.runCurrent()
+        assertEquals(null, capturedTicket.captured.limitPrice)
+
+        // 2. Scientific notation DoS ("1e1000000") + switch to MARKET or OCO_BRACKET must never throw/hang
+        harness.stagedOrderHolder.stageBlankOrder(symbol = "SPY", spotPrice = 550.0)
+        harness.viewModel.updateLimitPrice("1e1000000")
+        harness.viewModel.updateOrderType(OrderType.MARKET)
+        harness.viewModel.reviewAndSubmit()
+        testScheduler.runCurrent()
+        assertTrue(harness.viewModel.uiState.value.readyForBiometricSwipe || harness.viewModel.uiState.value.pendingRiskAssessment != null)
+
+        harness.viewModel.updateLimitPrice("1e1000000")
+        harness.viewModel.selectStrategyCategory(OrderStrategyCategory.OCO_BRACKET)
+        harness.viewModel.updateOcoTakeProfit("600.00")
+        harness.viewModel.updateOcoStopPrice("500.00")
+        harness.viewModel.reviewAndSubmit()
+        testScheduler.runCurrent()
+        assertTrue(harness.viewModel.uiState.value.readyForBiometricSwipe || harness.viewModel.uiState.value.pendingRiskAssessment != null)
+
+        // 3. Negative input "-10" then switching to MARKET must yield empty limitPriceInput and null limitPrice
+        harness.viewModel.selectStrategyCategory(OrderStrategyCategory.SINGLE_EQUITY)
+        harness.viewModel.updateLimitPrice("-10")
+        harness.viewModel.updateOrderType(OrderType.MARKET)
+        assertEquals("", harness.viewModel.uiState.value.limitPriceInput)
+
+        collectJob.cancel()
+    }
+
     private data class Harness(
         val viewModel: OrderTicketViewModel,
         val stagedOrderHolder: StagedOrderHolder,
